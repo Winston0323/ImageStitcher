@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
@@ -22,12 +23,12 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // 预览数据
   Uint8List? _previewBytes;
-  int _lastProgressMs = 0;  // 节流：限制setState频率
+
+  // 进度轮询定时器 — 完全解耦回调与UI更新，避免 MouseTracker / RenderBox 崩溃
+  Timer? _progressTimer;
 
   @override
   Widget build(BuildContext context) {
-    // 处理中也保留预览（显示旧数据），避免UI塌陷
-    final showPreview = _previewBytes != null;
     final hasImages = _selectedImages.isNotEmpty;
 
     return Scaffold(
@@ -46,74 +47,51 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
         ],
       ),
-      body: Stack(
-        children: [
-          Padding(
-            padding: const EdgeInsets.all(12),
-            child: hasImages
-                ? Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      // 左侧面板
-                      Expanded(
-                        flex: showPreview ? 1 : 0,
-                        child: SingleChildScrollView(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.stretch,
-                            children: [
-                              _buildModeSelector(),
-                              const SizedBox(height: 12),
-                              _buildAddButton(),
-                              const SizedBox(height: 12),
-                              _buildImageList(),
-                              if (!showPreview || _selectedImages.length < 2) ...[
-                                const SizedBox(height: 12),
-                                _buildActionButtons(),
-                              ],
-                              const SizedBox(height: 16),
-                              if (_resultPath != null) ...[
-                                _buildResultSection(),
-                                const SizedBox(height: 12),
-                              ],
-                            ],
-                          ),
-                        ),
-                      ),
-
-                      // 分隔线
-                      if (showPreview) ...[
-                        const SizedBox(width: 12),
-                        Container(width: 1, color: Colors.grey.shade300),
-                        const SizedBox(width: 12),
-                      ],
-
-                      // 右侧预览区
-                      if (showPreview)
-                        Expanded(flex: 2, child: _buildPreviewPanel()),
+      body: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // 左侧面板
+            Expanded(
+              flex: 1,
+              child: SingleChildScrollView(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    _buildModeSelector(),
+                    const SizedBox(height: 12),
+                    _buildAddButton(),
+                    const SizedBox(height: 12),
+                    _buildImageList(),
+                    if (hasImages && _selectedImages.length >= 2) ...[
+                      const SizedBox(height: 12),
+                      _buildActionButtons(),
                     ],
-                  )
-                : SingleChildScrollView(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        _buildModeSelector(),
-                        const SizedBox(height: 16),
-                        _buildAddButton(),
-                        const SizedBox(height: 16),
-                        _buildImageList(),
-                        const SizedBox(height: 32),
-                      ],
-                    ),
-                  ),
-          ),
+                    const SizedBox(height: 16),
+                    if (_resultPath != null) ...[
+                      _buildResultSection(),
+                      const SizedBox(height: 12),
+                    ],
+                  ],
+                ),
+              ),
+            ),
 
-          if (_isProcessing) _buildProgressDialog(),
-        ],
+            // 分隔线
+            const SizedBox(width: 12),
+            Container(width: 1, color: Colors.grey.shade300),
+            const SizedBox(width: 12),
+
+            // 右侧预览区 — 常驻
+            Expanded(flex: 2, child: _buildPreviewPanel()),
+          ],
+        ),
       ),
     );
   }
 
-  // ========== 预览面板 ==========
+  // ========== 预览面板（常驻）==========
 
   Widget _buildPreviewPanel() {
     return Card(
@@ -123,6 +101,7 @@ class _HomeScreenState extends State<HomeScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          // 顶部工具栏
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
             color: Theme.of(context).colorScheme.primaryContainer.withValues(alpha: 0.5),
@@ -133,19 +112,76 @@ class _HomeScreenState extends State<HomeScreen> {
                 Text('预览 (${_stitchMode == StitchMode.horizontal ? "水平" : "垂直"}拼接)',
                     style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
                 const Spacer(),
-                IconButton(visualDensity: VisualDensity.compact, icon: const Icon(Icons.refresh, size: 20), tooltip: '刷新预览', onPressed: _selectedImages.length >= 2 ? _autoPreview : null),
-                IconButton(visualDensity: VisualDensity.compact, icon: const Icon(Icons.save_alt, size: 20), tooltip: '保存图片', onPressed: _selectedImages.length >= 2 ? _saveFromPreview : null),
+                if (_isProcessing)
+                  Padding(
+                    padding: const EdgeInsets.only(right: 8),
+                    child: SizedBox(
+                      width: 16, height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.blue),
+                    ),
+                  ),
+                IconButton(visualDensity: VisualDensity.compact, icon: const Icon(Icons.refresh, size: 20), tooltip: '刷新预览', onPressed: (_selectedImages.length >= 2 && !_isProcessing) ? _autoPreview : null),
               ],
             ),
           ),
+          // 内容区域
           Flexible(
-            child: Container(color: Colors.grey[100], constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.65), child: InteractiveViewer(minScale: 0.15, maxScale: 8.0, boundaryMargin: const EdgeInsets.all(16), child: Center(child: Image.memory(_previewBytes!, fit: BoxFit.contain, errorBuilder: (_, __, ___) => const Icon(Icons.broken_image, size: 64, color: Colors.redAccent))))),
+            child: Stack(
+              alignment: Alignment.center,
+              children: [
+                // 图片或占位
+                Container(
+                  color: Colors.grey[100],
+                  constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.65),
+                  child: _previewBytes != null
+                      ? InteractiveViewer(
+                          minScale: 0.15,
+                          maxScale: 8.0,
+                          boundaryMargin: const EdgeInsets.all(16),
+                          child: Center(
+                            child: Image.memory(_previewBytes!, fit: BoxFit.contain,
+                              errorBuilder: (_, __, ___) => const Icon(Icons.broken_image, size: 64, color: Colors.redAccent)),
+                          ),
+                        )
+                      : Center(
+                          child: Column(mainAxisSize: MainAxisSize.min, children: [
+                            Icon(Icons.image_outlined, size: 64, color: Colors.grey[350]),
+                            const SizedBox(height: 12),
+                            Text('选择 2 张以上图片后\n将在此显示预览',
+                                textAlign: TextAlign.center, style: TextStyle(fontSize: 14, color: Colors.grey[500], height: 1.5)),
+                          ]),
+                        ),
+                ),
+                // 处理中进度覆盖层
+                if (_isProcessing)
+                  Positioned.fill(
+                    child: Container(
+                      color: Colors.black45,
+                      alignment: Alignment.center,
+                      child: Card(
+                        elevation: 6,
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                        child: Padding(padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 24), child: Column(mainAxisSize: MainAxisSize.min, children: [
+                          SizedBox(width: 48, height: 48, child: CircularProgressIndicator(strokeWidth: 3, value: _progress > 0 ? _progress : null)),
+                          const SizedBox(height: 16),
+                          Text('正在拼接... ${(_progress * 100).toInt()}%',
+                              style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14)),
+                          const SizedBox(height: 8),
+                          SizedBox(width: 120, child: LinearProgressIndicator(value: _progress)),
+                        ])),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
           ),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-            decoration: BoxDecoration(border: Border(top: BorderSide(color: Colors.grey.shade200))),
-            child: FilledButton.icon(onPressed: _saveFromPreview, icon: const Icon(Icons.save, size: 18), label: const Text('保存此图片'), style: FilledButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 10))),
-          ),
+          // 底部保存按钮（仅预览可用时显示）
+          if (_previewBytes != null && !_isProcessing)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              decoration: BoxDecoration(border: Border(top: BorderSide(color: Colors.grey.shade200))),
+              child: FilledButton.icon(onPressed: _saveFromPreview, icon: const Icon(Icons.save, size: 18), label: const Text('保存此图片'), style: FilledButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 10))),
+            ),
         ],
       ),
     );
@@ -161,7 +197,7 @@ class _HomeScreenState extends State<HomeScreen> {
         SegmentedButton<StitchMode>(segments: const [
           ButtonSegment(value: StitchMode.horizontal, label: Text('水平'), icon: Icon(Icons.view_column, size: 18)),
           ButtonSegment(value: StitchMode.vertical, label: Text('垂直'), icon: Icon(Icons.view_stream, size: 18)),
-        ], selected: {_stitchMode}, onSelectionChanged: (selection) async { setState(() => _stitchMode = selection.first); await _autoPreview(); }),
+        ], selected: {_stitchMode}, onSelectionChanged: (selection) { setState(() => _stitchMode = selection.first); }),
         _modeHint(_stitchMode == StitchMode.horizontal ? '按宽度对齐，横向排列（统一高度）' : '按长度对齐，纵向排列（统一宽度）'),
       ])),
     );
@@ -202,11 +238,11 @@ class _HomeScreenState extends State<HomeScreen> {
       const SizedBox(height: 6),
       ConstrainedBox(constraints: BoxConstraints(maxHeight: 300), child: ListView.builder(shrinkWrap: true, itemCount: _selectedImages.length, itemBuilder: (context, index) {
         final item = _selectedImages[index];
-        return Dismissible(key: ValueKey(item.file.path), direction: DismissDirection.endToStart, onDismissed: (_) { setState(() => _selectedImages.removeAt(index)); _autoPreview(); },
+        return Dismissible(key: ValueKey(item.file.path), direction: DismissDirection.endToStart, onDismissed: (_) { setState(() => _selectedImages.removeAt(index)); },
           background: Container(alignment: Alignment.centerRight, margin: const EdgeInsets.symmetric(vertical: 2), padding: const EdgeInsets.only(right: 12), color: Colors.red, child: const Icon(Icons.delete, color: Colors.white)),
           child: ListTile(contentPadding: const EdgeInsets.symmetric(horizontal: 6), dense: true, leading: ClipRRect(borderRadius: BorderRadius.circular(4), child: Image.file(item.file, width: 44, height: 44, fit: BoxFit.cover, errorBuilder: (_, __, ___) => _placeholderIcon())),
             title: Text(item.name, overflow: TextOverflow.ellipsis, maxLines: 1, style: const TextStyle(fontSize: 13)), subtitle: Text('#${index + 1}', style: const TextStyle(fontSize: 11, color: Colors.blue, fontWeight: FontWeight.w600)),
-            trailing: IconButton(iconSize: 18, icon: const Icon(Icons.remove_circle_outline, color: Colors.redAccent), onPressed: () { setState(() => _selectedImages.removeAt(index)); _autoPreview(); }),
+            trailing: IconButton(iconSize: 18, icon: const Icon(Icons.remove_circle_outline, color: Colors.redAccent), onPressed: () => setState(() => _selectedImages.removeAt(index))),
         ));
       })),
     ])));
@@ -228,18 +264,6 @@ class _HomeScreenState extends State<HomeScreen> {
       Expanded(child: FilledButton.tonal(onPressed: (_selectedImages.length < 2 || _isProcessing) ? null : _saveStitched, style: FilledButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 10)), child: const Row(mainAxisAlignment: MainAxisAlignment.center, children: [Icon(Icons.save_alt, size: 18), SizedBox(width: 6), Text('保存图片')]))),
     ])));
 
-  Widget _buildProgressDialog() => Positioned(bottom: 0, left: 0, right: 0, child: Material(elevation: 8, color: Theme.of(context).colorScheme.surface, child: SafeArea(
-    top: false, child: Padding(padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10), child: Column(mainAxisSize: MainAxisSize.min, children: [
-      Row(children: [
-        const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.blue)),
-        const SizedBox(width: 10),
-        const Text('正在生成预览...', style: TextStyle(fontWeight: FontWeight.w500, fontSize: 13)),
-        const Spacer(), Text('${(_progress * 100).toInt()}%', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14, fontFeatures: [FontFeature.tabularFigures()])),
-      ]),
-      const SizedBox(height: 6),
-      LinearProgressIndicator(value: _progress),
-    ])))));
-
   Widget _placeholderIcon() => Container(width: 44, height: 44, color: Colors.grey[200], child: const Icon(Icons.image, color: Colors.grey, size: 22));
 
   // ========== 核心功能 ==========
@@ -252,7 +276,6 @@ class _HomeScreenState extends State<HomeScreen> {
         if (file.path == null) continue;
         setState(() => _selectedImages.add(ImageItem(file: File(file.path!), name: file.name ?? '')));
       }
-      if (_selectedImages.length >= 2) await _autoPreview();
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('已添加 ${result.files.length} 张图片'), duration: const Duration(seconds: 1)));
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('选择失败: $e')));
@@ -260,25 +283,46 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _autoPreview() async {
-    if (_selectedImages.length < 2) { setState(() => _previewBytes = null); return; }
-    // 保留旧预览显示，不清空！避免UI塌陷
+    if (_selectedImages.length < 2) return; // 保留旧预览，不清空
+    _startProgressTimer();
     setState(() { _isProcessing = true; _progress = 0.0; });
     try {
       final imageBytes = await _getSelectedImageBytes();
       final stitchedBytes = await ImageStitcherService.stitchImages(imageBytes, mode: _stitchMode, onProgress: (p) {
-        final now = DateTime.now().millisecondsSinceEpoch;
-        if (now - _lastProgressMs > 100 || p >= 1.0) {
-          _lastProgressMs = now;
-          // 关键：推到 microtask，避免在设备更新期间 setState 导致 mouse_tracker 崩溃
-          Future.microtask(() { if (mounted) setState(() => _progress = p); });
-        }
+        // 回调只负责存数据，绝不触发setState
+        _progress = p;
       });
       if (mounted) setState(() => _previewBytes = stitchedBytes);
     } catch (e) {
       // 失败也保留旧预览（如果有），不清空
     } finally {
+      _stopProgressTimer();
       if (mounted) setState(() => _isProcessing = false);
     }
+  }
+
+  /// 启动进度轮询定时器 — 每200ms安全地刷新一次UI
+  void _startProgressTimer() {
+    _stopProgressTimer(); // 防止重复启动
+    _progressTimer = Timer.periodic(const Duration(milliseconds: 200), (_) {
+      if (mounted && _isProcessing) {
+        setState(() {}); // 仅触发重建，读取最新的 _progress 值
+      } else {
+        _stopProgressTimer();
+      }
+    });
+  }
+
+  /// 停止进度定时器
+  void _stopProgressTimer() {
+    _progressTimer?.cancel();
+    _progressTimer = null;
+  }
+
+  @override
+  void dispose() {
+    _stopProgressTimer();
+    super.dispose();
   }
 
   Future<void> _saveFromPreview() async {
@@ -287,29 +331,26 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _saveStitched() async {
+    _startProgressTimer();
     setState(() { _isProcessing = true; _progress = 0.0; });
     try {
       final imageBytes = await _getSelectedImageBytes();
       final stitchedBytes = await ImageStitcherService.stitchImages(imageBytes, mode: _stitchMode, onProgress: (p) {
-        final now = DateTime.now().millisecondsSinceEpoch;
-        if (now - _lastProgressMs > 100 || p >= 1.0) {
-          _lastProgressMs = now;
-          Future.microtask(() { if (mounted) setState(() => _progress = p); });
-        }
+        _progress = p; // 仅存数据
       });
       await _saveStitchedFromBytes(stitchedBytes);
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('拼接失败: $e')));
     } finally {
+      _stopProgressTimer();
       if (mounted) setState(() => _isProcessing = false);
     }
   }
 
   void _reorderImages() {
     final reordered = List<ImageItem>.from(_selectedImages);
-    showDialog(context: context, builder: (ctx) => AlertDialog(title: const Row(children: [Icon(Icons.sort, size: 20), SizedBox(width: 8), Text('调整图片顺序')]), content: SizedBox(width: double.maxFinite, height: 320, child: ReorderableListView.builder(shrinkWrap: true, itemCount: reordered.length, onReorder: (oldIndex, newIndex) {
+    showDialog(context: context, builder: (ctx) => AlertDialog(title: const Row(children: [Icon(Icons.sort, size: 20), SizedBox(width: 8), Text('调整图片顺序')]), content: SizedBox(width: double.maxFinite, height: 320,     child: ReorderableListView.builder(shrinkWrap: true, itemCount: reordered.length, onReorder: (oldIndex, newIndex) {
       setState(() { if (newIndex > oldIndex) newIndex--; final item = reordered.removeAt(oldIndex); reordered.insert(newIndex, item); _selectedImages.clear(); _selectedImages.addAll(reordered); });
-      _autoPreview();
     }, itemBuilder: (ctx, index) {
       final item = reordered[index];
       return ListTile(key: ValueKey(item.file.path), dense: true, contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2), leading: CircleAvatar(radius: 14, backgroundColor: Theme.of(ctx).colorScheme.primary, foregroundColor: Colors.white, child: Text('${index + 1}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold))), title: Text(item.name, overflow: TextOverflow.ellipsis, maxLines: 1, style: const TextStyle(fontSize: 13)), trailing: const Icon(Icons.drag_handle, color: Colors.grey, size: 20));
@@ -317,7 +358,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _saveStitchedFromBytes(Uint8List bytes) async {
-    final savedPath = await FilePicker.platform.saveFile(dialogTitle: '保存拼接后的图片', fileName: 'stitched_${_stitchMode == StitchMode.horizontal ? "H" : "V"}_${DateTime.now().millisecondsSinceEpoch}.png', type: FileType.custom, allowedExtensions: ['png']);
+    final savedPath = await FilePicker.platform.saveFile(dialogTitle: '保存拼接后的图片', fileName: 'stitched_${_stitchMode == StitchMode.horizontal ? "H" : "V"}_${DateTime.now().millisecondsSinceEpoch}.jpg', type: FileType.custom, allowedExtensions: ['jpg']);
     if (savedPath != null && savedPath.isNotEmpty) {
       await File(savedPath).writeAsBytes(bytes);
       setState(() => _resultPath = savedPath);

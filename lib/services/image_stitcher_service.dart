@@ -1,15 +1,11 @@
 import 'dart:async';
 import 'dart:ui' as ui;
 import 'dart:typed_data';
+import 'package:image/image.dart' as image_lib;
+
 import '../models/image_item.dart';
 
-/// 图片拼接服务 - 纯 dart:ui GPU Canvas 方案
-///
-/// 流程:
-///   1. 异步解码所有图片 (平台原生解码器)
-///   2. 计算画布尺寸和每张图的绘制区域
-///   3. GPU Canvas 绘制合成 (缩放+拼接)
-///   4. 渲染为 Image 并导出 PNG/JPEG
+/// 图片拼接服务 - GPU Canvas + image 包 JPEG 编码
 class ImageStitcherService {
 
   /// 拼接多张图片
@@ -81,25 +77,32 @@ class ImageStitcherService {
 
     final picture = recorder.endRecording();
 
-    // ========== Step 4: GPU 渲染为 Image (72% ~ 80%) ==========
+    // ========== Step 4: GPU 渲染为 Image (72% ~ 85%) ==========
     onProgress?.call(0.74);
     final resultImage = await picture.toImage(canvasWidth, canvasHeight);
     picture.dispose();
-    onProgress?.call(0.82);
 
-    // ========== Step 5: 导出 PNG (82% ~ 100%) ==========
-    onProgress?.call(0.85); // 开始编码
+    // ========== Step 5: 导出 JPEG (85% ~ 100%) ==========
+    onProgress?.call(0.85);
 
-    // 用 Future.microtask 让进度条先更新到 85%
-    await Future.delayed(const Duration(milliseconds: 50));
-
-    final byteData = await resultImage.toByteData(format: ui.ImageByteFormat.png);
+    // rawRgba 快速提取像素（几乎不耗时），再用 image 包编码为 JPEG
+    final byteData = await resultImage.toByteData(format: ui.ImageByteFormat.rawRgba);
     resultImage.dispose();
 
     if (byteData == null) throw Exception('图片导出失败');
 
+    onProgress?.call(0.92);
+    // image 包 JPEG 编码 — 比 dart:ui 原生 PNG 快 5-10 倍
+    final img = image_lib.Image.fromBytes(
+      width: canvasWidth,
+      height: canvasHeight,
+      bytes: byteData.buffer,
+      numChannels: 4,
+    );
+    final jpegBytes = image_lib.JpegEncoder(quality: 92).encode(img);
+
     onProgress?.call(1.0);
-    return byteData.buffer.asUint8List();
+    return jpegBytes;
   }
 
   /// 使用平台原生解码器异步解码图片
