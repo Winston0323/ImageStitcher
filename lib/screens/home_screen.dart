@@ -288,13 +288,16 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() { _isProcessing = true; _progress = 0.0; });
     try {
       final imageBytes = await _getSelectedImageBytes();
-      final stitchedBytes = await ImageStitcherService.stitchImages(imageBytes, mode: _stitchMode, onProgress: (p) {
-        // 回调只负责存数据，绝不触发setState
-        _progress = p;
-      });
+      final stitchedBytes = await ImageStitcherService.stitchImages(
+        imageBytes,
+        mode: _stitchMode,
+        onProgress: (p) => _progress = p,
+        maxPreviewDim: 2048, // 预览缩放到最大边长2048，编码快10-50倍
+      );
       if (mounted) setState(() => _previewBytes = stitchedBytes);
     } catch (e) {
-      // 失败也保留旧预览（如果有），不清空
+      // 失败也保留旧预览（如果有），不清空，但显示错误
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('预览生成失败: $e'), duration: const Duration(seconds: 5)));
     } finally {
       _stopProgressTimer();
       if (mounted) setState(() => _isProcessing = false);
@@ -326,8 +329,24 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _saveFromPreview() async {
-    if (_previewBytes == null) return;
-    await _saveStitchedFromBytes(_previewBytes!);
+    if (_selectedImages.length < 2) return;
+    _startProgressTimer();
+    setState(() { _isProcessing = true; _progress = 0.0; });
+    try {
+      final imageBytes = await _getSelectedImageBytes();
+      // 保存时使用全分辨率（不传 maxPreviewDim，默认为 0 表示不缩放）
+      final fullResBytes = await ImageStitcherService.stitchImages(
+        imageBytes,
+        mode: _stitchMode,
+        onProgress: (p) => _progress = p,
+      );
+      await _saveStitchedFromBytes(fullResBytes);
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('保存失败: $e'), duration: const Duration(seconds: 5)));
+    } finally {
+      _stopProgressTimer();
+      if (mounted) setState(() => _isProcessing = false);
+    }
   }
 
   Future<void> _saveStitched() async {

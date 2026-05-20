@@ -15,8 +15,8 @@ dependencies:
   # 文件选择与保存（跨平台）
   file_picker: ^8.0.0
   
-  # 图片处理
-  image: ^4.1.3
+  # 高性能 JPEG 编码（FFI + SIMD 加速，比 dart:ui PNG 快 5-20 倍）
+  ffi_jpeg_encode: ^1.0.0
   
   # UI 组件
   cupertino_icons: ^1.0.6
