@@ -12,6 +12,7 @@ class ImageStitcherService {
   /// 拼接多张图片
   /// [maxPreviewDim] 预览时限制最大边长（如2048），保存时传0表示不缩放
   /// [jpegQuality] JPEG编码质量 (1-100)，默认95
+  /// [outputLossless] 为 true 时使用 PNG 无损编码，否则 JPEG
   static Future<Uint8List> stitchImages(
     List<Uint8List> images, {
     required StitchMode mode,
@@ -19,6 +20,7 @@ class ImageStitcherService {
     void Function(String message)? onLog,
     int maxPreviewDim = 0,  // 0=原始尺寸, >0=缩放到此最大边长
     int jpegQuality = 95,   // JPEG质量 1-100
+    bool outputLossless = true,
   }) async {
     if (images.isEmpty) throw Exception('没有可拼接的图片');
     if (images.length == 1) return images.first;
@@ -140,7 +142,6 @@ class ImageStitcherService {
     }
 
     // ========== Step 6: 编码导出 ==========
-    // 策略：预览(缩放后小图)用PNG（可靠无黑边），保存(全尺寸大图)用FFI-JPEG（加速5-20倍）
     final mp = (encodeImage.width * encodeImage.height / 1000000).toStringAsFixed(1);
     final isPreview = maxPreviewDim > 0;
     Uint8List outputBytes;
@@ -154,6 +155,15 @@ class ImageStitcherService {
       if (pngByteData == null) throw Exception('PNG编码失败');
       outputBytes = pngByteData.buffer.asUint8List(pngByteData.offsetInBytes, pngByteData.lengthInBytes);
       log('✅ PNG 导出完成! 文件大小: ${(outputBytes.length / 1024).toStringAsFixed(1)} KB');
+    } else if (outputLossless) {
+      // 全尺寸无损保存 → PNG
+      log('PNG 无损编码中 ($mp MP)...');
+      onProgress?.call(0.90);
+      final pngByteData = await encodeImage.toByteData(format: ui.ImageByteFormat.png);
+      encodeImage.dispose();
+      if (pngByteData == null) throw Exception('PNG编码失败');
+      outputBytes = pngByteData.buffer.asUint8List(pngByteData.offsetInBytes, pngByteData.lengthInBytes);
+      log('✅ PNG 无损导出完成! 文件大小: ${(outputBytes.length / 1024).toStringAsFixed(1)} KB');
     } else {
       // 全尺寸保存模式 → 用 FFI+SIMD JPEG 加速（大图比PNG快5-20倍）
       log('JPEG 编码中 ($mp MP, quality=$jpegQuality)...');

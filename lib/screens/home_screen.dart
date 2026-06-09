@@ -277,6 +277,8 @@ class _HomeScreenState extends State<HomeScreen> {
         setState(() => _selectedImages.add(ImageItem(file: File(file.path!), name: file.name ?? '')));
       }
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('已添加 ${result.files.length} 张图片'), duration: const Duration(seconds: 1)));
+      // 自动生成预览
+      if (_selectedImages.length >= 2) _autoPreview();
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('选择失败: $e')));
     }
@@ -330,17 +332,23 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _saveFromPreview() async {
     if (_selectedImages.length < 2) return;
+    // 先让用户选择保存路径和格式
+    final saveArgs = await _pickSavePathAndFormat();
+    if (saveArgs == null) return;
+
     _startProgressTimer();
     setState(() { _isProcessing = true; _progress = 0.0; });
     try {
       final imageBytes = await _getSelectedImageBytes();
-      // 保存时使用全分辨率（不传 maxPreviewDim，默认为 0 表示不缩放）
       final fullResBytes = await ImageStitcherService.stitchImages(
         imageBytes,
         mode: _stitchMode,
         onProgress: (p) => _progress = p,
+        outputLossless: saveArgs.$2,
       );
-      await _saveStitchedFromBytes(fullResBytes);
+      await File(saveArgs.$1).writeAsBytes(fullResBytes);
+      setState(() => _resultPath = saveArgs.$1);
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('已保存至: ${saveArgs.$1}'), duration: const Duration(seconds: 3)));
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('保存失败: $e'), duration: const Duration(seconds: 5)));
     } finally {
@@ -350,14 +358,24 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _saveStitched() async {
+    if (_selectedImages.length < 2) return;
+    // 先让用户选择保存路径和格式
+    final saveArgs = await _pickSavePathAndFormat();
+    if (saveArgs == null) return;
+
     _startProgressTimer();
     setState(() { _isProcessing = true; _progress = 0.0; });
     try {
       final imageBytes = await _getSelectedImageBytes();
-      final stitchedBytes = await ImageStitcherService.stitchImages(imageBytes, mode: _stitchMode, onProgress: (p) {
-        _progress = p; // 仅存数据
-      });
-      await _saveStitchedFromBytes(stitchedBytes);
+      final stitchedBytes = await ImageStitcherService.stitchImages(
+        imageBytes,
+        mode: _stitchMode,
+        onProgress: (p) { _progress = p; },
+        outputLossless: saveArgs.$2,
+      );
+      await File(saveArgs.$1).writeAsBytes(stitchedBytes);
+      setState(() => _resultPath = saveArgs.$1);
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('已保存至: ${saveArgs.$1}'), duration: const Duration(seconds: 3)));
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('拼接失败: $e')));
     } finally {
@@ -376,13 +394,17 @@ class _HomeScreenState extends State<HomeScreen> {
     })), actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('完成'))]));
   }
 
-  Future<void> _saveStitchedFromBytes(Uint8List bytes) async {
-    final savedPath = await FilePicker.platform.saveFile(dialogTitle: '保存拼接后的图片', fileName: 'stitched_${_stitchMode == StitchMode.horizontal ? "H" : "V"}_${DateTime.now().millisecondsSinceEpoch}.jpg', type: FileType.custom, allowedExtensions: ['jpg']);
-    if (savedPath != null && savedPath.isNotEmpty) {
-      await File(savedPath).writeAsBytes(bytes);
-      setState(() => _resultPath = savedPath);
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('已保存至: $savedPath'), duration: const Duration(seconds: 3)));
-    }
+  /// 先让用户选择保存路径和格式，返回 (path, isLossless)
+  Future<(String, bool)?> _pickSavePathAndFormat() async {
+    final savedPath = await FilePicker.platform.saveFile(
+      dialogTitle: '保存拼接后的图片',
+      fileName: 'stitched_${_stitchMode == StitchMode.horizontal ? "H" : "V"}_${DateTime.now().millisecondsSinceEpoch}.png',
+      type: FileType.custom,
+      allowedExtensions: ['png', 'jpg'],
+    );
+    if (savedPath == null || savedPath.isEmpty) return null;
+    final isLossless = savedPath.toLowerCase().endsWith('.png');
+    return (savedPath, isLossless);
   }
 
   Future<List<Uint8List>> _getSelectedImageBytes() async => [for (var item in _selectedImages) await item.file.readAsBytes()];
