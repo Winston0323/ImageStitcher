@@ -13,6 +13,9 @@ class ImageStitcherService {
   /// [maxPreviewDim] 预览时限制最大边长（如2048），保存时传0表示不缩放
   /// [jpegQuality] JPEG编码质量 (1-100)，默认95
   /// [outputLossless] 为 true 时使用 PNG 无损编码，否则 JPEG
+  /// [addBorder] 是否给每张图片添加边框
+  /// [borderColor] 边框颜色
+  /// [borderWidth] 边框像素宽度
   static Future<Uint8List> stitchImages(
     List<Uint8List> images, {
     required StitchMode mode,
@@ -21,6 +24,9 @@ class ImageStitcherService {
     int maxPreviewDim = 0,  // 0=原始尺寸, >0=缩放到此最大边长
     int jpegQuality = 95,   // JPEG质量 1-100
     bool outputLossless = true,
+    bool addBorder = false,
+    ui.Color borderColor = const ui.Color(0xFF000000),
+    int borderWidth = 2,
   }) async {
     if (images.isEmpty) throw Exception('没有可拼接的图片');
     if (images.length == 1) return images.first;
@@ -47,6 +53,7 @@ class ImageStitcherService {
     log('计算画布尺寸...');
     int canvasWidth, canvasHeight;
     List<ui.Rect> dstRects;
+    final bw = addBorder ? borderWidth : 0;
 
     if (mode == StitchMode.horizontal) {
       int maxHeight = decodedImages.map((e) => e.height).reduce((a, b) => a > b ? a : b);
@@ -57,7 +64,18 @@ class ImageStitcherService {
         dstRects.add(ui.Rect.fromLTWH(totalWidth.toDouble(), 0, w.toDouble(), maxHeight.toDouble()));
         totalWidth += w;
       }
-      canvasWidth = totalWidth; canvasHeight = maxHeight;
+      canvasWidth = totalWidth + bw * (decodedImages.length + 1);
+      canvasHeight = maxHeight + 2 * bw;
+      if (addBorder) {
+        double offsetX = bw.toDouble();
+        for (int i = 0; i < dstRects.length; i++) {
+          dstRects[i] = ui.Rect.fromLTWH(
+            offsetX, bw.toDouble(),
+            dstRects[i].width, dstRects[i].height,
+          );
+          offsetX += dstRects[i].width + bw;
+        }
+      }
     } else {
       int maxWidth = decodedImages.map((e) => e.width).reduce((a, b) => a > b ? a : b);
       int totalHeight = 0;
@@ -67,7 +85,18 @@ class ImageStitcherService {
         dstRects.add(ui.Rect.fromLTWH(0, totalHeight.toDouble(), maxWidth.toDouble(), h.toDouble()));
         totalHeight += h;
       }
-      canvasWidth = maxWidth; canvasHeight = totalHeight;
+      canvasWidth = maxWidth + 2 * bw;
+      canvasHeight = totalHeight + bw * (decodedImages.length + 1);
+      if (addBorder) {
+        double offsetY = bw.toDouble();
+        for (int i = 0; i < dstRects.length; i++) {
+          dstRects[i] = ui.Rect.fromLTWH(
+            bw.toDouble(), offsetY,
+            dstRects[i].width, dstRects[i].height,
+          );
+          offsetY += dstRects[i].height + bw;
+        }
+      }
     }
     final pixelCount = (canvasWidth * canvasHeight / 1000000).toStringAsFixed(1);
     log('✅ 原始画布: ${canvasWidth}×${canvasHeight} ($pixelCount MP)');
@@ -96,10 +125,23 @@ class ImageStitcherService {
 
     for (int i = 0; i < decodedImages.length; i++) {
       final src = decodedImages[i];
+      final dst = dstRects[i];
+
+      if (addBorder) {
+        // 在图片下方绘制边框（比图片略大一圈）
+        canvas.drawRect(
+          ui.Rect.fromLTWH(
+            dst.left - bw, dst.top - bw,
+            dst.width + 2 * bw, dst.height + 2 * bw,
+          ),
+          ui.Paint()..color = borderColor,
+        );
+      }
+
       canvas.drawImageRect(
         src,
         ui.Rect.fromLTWH(0, 0, src.width.toDouble(), src.height.toDouble()),
-        dstRects[i],
+        dst,
         ui.Paint()..filterQuality = ui.FilterQuality.medium,
       );
       onProgress?.call(0.24 + 0.48 * ((i + 1) / decodedImages.length));
