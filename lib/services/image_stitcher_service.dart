@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'dart:ui' as ui;
 import 'package:flutter/foundation.dart';
 
@@ -205,5 +206,54 @@ class ImageStitcherService {
     final completer = Completer<ui.Image?>();
     ui.decodeImageFromList(bytes, (result) => completer.complete(result));
     return completer.future;
+  }
+
+  /// 生成缩略图，像素数量约为原图的 [percent]%
+  /// [percent] 默认 10，表示 10% 像素（线性缩放约 31.6%）
+  static Future<Uint8List> createThumbnail(Uint8List originalBytes, {double percent = 10}) async {
+    final image = await _decodeImageFromBytes(originalBytes);
+    if (image == null) throw Exception('缩略图解码失败');
+
+    final srcW = image.width;
+    final srcH = image.height;
+
+    // 像素百分比 → 线性缩放比例
+    final scale = math.sqrt(percent / 100).clamp(0.01, 1.0);
+    int dstW = (srcW * scale).round();
+    int dstH = (srcH * scale).round();
+
+    // 保持比例的前提下限制最小/最大尺寸
+    final minDim = dstW < dstH ? dstW : dstH;
+    if (minDim < 64) {
+      final adjust = 64.0 / minDim;
+      dstW = (dstW * adjust).round();
+      dstH = (dstH * adjust).round();
+    }
+    final maxDim = dstW > dstH ? dstW : dstH;
+    if (maxDim > 4096) {
+      final adjust = 4096.0 / maxDim;
+      dstW = (dstW * adjust).round();
+      dstH = (dstH * adjust).round();
+    }
+
+    final recorder = ui.PictureRecorder();
+    final canvas = ui.Canvas(recorder);
+    canvas.drawImageRect(
+      image,
+      ui.Rect.fromLTWH(0, 0, srcW.toDouble(), srcH.toDouble()),
+      ui.Rect.fromLTWH(0, 0, dstW.toDouble(), dstH.toDouble()),
+      ui.Paint()..filterQuality = ui.FilterQuality.high,
+    );
+    image.dispose();
+
+    final picture = recorder.endRecording();
+    final scaledImage = await picture.toImage(dstW, dstH);
+    picture.dispose();
+
+    final byteData = await scaledImage.toByteData(format: ui.ImageByteFormat.png);
+    scaledImage.dispose();
+    if (byteData == null) throw Exception('缩略图编码失败');
+
+    return byteData.buffer.asUint8List();
   }
 }

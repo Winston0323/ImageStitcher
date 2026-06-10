@@ -18,8 +18,11 @@ class _HomeScreenState extends State<HomeScreen> {
   final List<ImageItem> _selectedImages = [];
   StitchMode _stitchMode = StitchMode.horizontal;
   bool _isProcessing = false;
-  double _progress = 0.0;
   String? _resultPath;
+
+  // 保存进度
+  double _saveProgress = 0.0;
+  Timer? _saveTimer;
 
   // 边框设置
   int _borderColorIndex = 0; // 0=白色, 1=黑色
@@ -27,9 +30,6 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // 预览数据
   Uint8List? _previewBytes;
-
-  // 进度轮询定时器 — 完全解耦回调与UI更新，避免 MouseTracker / RenderBox 崩溃
-  Timer? _progressTimer;
 
   @override
   Widget build(BuildContext context) {
@@ -158,8 +158,8 @@ class _HomeScreenState extends State<HomeScreen> {
                           ]),
                         ),
                 ),
-                // 处理中进度覆盖层
-                if (_isProcessing)
+                // 保存进度覆盖层
+                if (_saveProgress > 0)
                   Positioned.fill(
                     child: Container(
                       color: Colors.black45,
@@ -168,12 +168,12 @@ class _HomeScreenState extends State<HomeScreen> {
                         elevation: 6,
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                         child: Padding(padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 24), child: Column(mainAxisSize: MainAxisSize.min, children: [
-                          SizedBox(width: 48, height: 48, child: CircularProgressIndicator(strokeWidth: 3, value: _progress > 0 ? _progress : null)),
+                          SizedBox(width: 48, height: 48, child: CircularProgressIndicator(strokeWidth: 3, value: _saveProgress)),
                           const SizedBox(height: 16),
-                          Text('正在拼接... ${(_progress * 100).toInt()}%',
+                          Text('正在保存... ${(_saveProgress * 100).toInt()}%',
                               style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14)),
                           const SizedBox(height: 8),
-                          SizedBox(width: 120, child: LinearProgressIndicator(value: _progress)),
+                          SizedBox(width: 120, child: LinearProgressIndicator(value: _saveProgress)),
                         ])),
                       ),
                     ),
@@ -181,7 +181,7 @@ class _HomeScreenState extends State<HomeScreen> {
               ],
             ),
           ),
-          // 底部保存按钮（仅预览可用时显示）
+          // 保存按钮（仅预览可用时显示）
           if (_previewBytes != null && !_isProcessing)
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
@@ -316,7 +316,10 @@ class _HomeScreenState extends State<HomeScreen> {
       if (result == null || result.files.isEmpty) return;
       for (var file in result.files) {
         if (file.path == null) continue;
-        setState(() => _selectedImages.add(ImageItem(file: File(file.path!), name: file.name ?? '')));
+        final item = ImageItem(file: File(file.path!), name: file.name ?? '');
+        setState(() => _selectedImages.add(item));
+        // 异步生成缩略图（5% 像素 ≈ 320x320 左右）
+        _generateThumbnail(item);
       }
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('已添加 ${result.files.length} 张图片'), duration: const Duration(seconds: 1)));
       // 自动生成预览
@@ -326,18 +329,29 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  Future<void> _generateThumbnail(ImageItem item) async {
+    try {
+      final bytes = await item.file.readAsBytes();
+      final thumb = await ImageStitcherService.createThumbnail(bytes, percent: 10);
+      if (mounted) {
+        setState(() => item.thumbnailBytes = thumb);
+      }
+    } catch (_) {
+      // 缩略图生成失败不影响主流程
+    }
+  }
+
   Color get _borderUiColor => _borderColorIndex == 0 ? Colors.white : Colors.black;
 
   Future<void> _autoPreview() async {
     if (_selectedImages.length < 2) return; // 保留旧预览，不清空
-    _startProgressTimer();
-    setState(() { _isProcessing = true; _progress = 0.0; });
+    setState(() { _isProcessing = true; });
     try {
-      final imageBytes = await _getSelectedImageBytes();
+      final imageBytes = await _getThumbnailBytes();
+      if (imageBytes == null) return; // 缩略图还没生成完，跳过
       final stitchedBytes = await ImageStitcherService.stitchImages(
         imageBytes,
         mode: _stitchMode,
-        onProgress: (p) => _progress = p,
         maxPreviewDim: 2048, // 预览缩放到最大边长2048，编码快10-50倍
         addBorder: _borderPercent > 0,
         borderColor: _borderUiColor,
@@ -348,32 +362,29 @@ class _HomeScreenState extends State<HomeScreen> {
       // 失败也保留旧预览（如果有），不清空，但显示错误
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('预览生成失败: $e'), duration: const Duration(seconds: 5)));
     } finally {
-      _stopProgressTimer();
       if (mounted) setState(() => _isProcessing = false);
     }
   }
 
-  /// 启动进度轮询定时器 — 每200ms安全地刷新一次UI
-  void _startProgressTimer() {
-    _stopProgressTimer(); // 防止重复启动
-    _progressTimer = Timer.periodic(const Duration(milliseconds: 200), (_) {
-      if (mounted && _isProcessing) {
-        setState(() {}); // 仅触发重建，读取最新的 _progress 值
+  void _startSaveTimer() {
+    _stopSaveTimer();
+    _saveTimer = Timer.periodic(const Duration(milliseconds: 200), (_) {
+      if (mounted && (_saveProgress > 0 || _isProcessing)) {
+        setState(() {});
       } else {
-        _stopProgressTimer();
+        _stopSaveTimer();
       }
     });
   }
 
-  /// 停止进度定时器
-  void _stopProgressTimer() {
-    _progressTimer?.cancel();
-    _progressTimer = null;
+  void _stopSaveTimer() {
+    _saveTimer?.cancel();
+    _saveTimer = null;
   }
 
   @override
   void dispose() {
-    _stopProgressTimer();
+    _stopSaveTimer();
     super.dispose();
   }
 
@@ -382,14 +393,14 @@ class _HomeScreenState extends State<HomeScreen> {
     final savePath = await _pickSavePath();
     if (savePath == null) return;
 
-    _startProgressTimer();
-    setState(() { _isProcessing = true; _progress = 0.0; });
+    _startSaveTimer();
+    setState(() { _isProcessing = true; _saveProgress = 0.0; });
     try {
       final imageBytes = await _getSelectedImageBytes();
       final fullResBytes = await ImageStitcherService.stitchImages(
         imageBytes,
         mode: _stitchMode,
-        onProgress: (p) => _progress = p,
+        onProgress: (p) => _saveProgress = p,
         addBorder: _borderPercent > 0,
         borderColor: _borderUiColor,
         borderPercent: _borderPercent,
@@ -400,8 +411,8 @@ class _HomeScreenState extends State<HomeScreen> {
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('保存失败: $e'), duration: const Duration(seconds: 5)));
     } finally {
-      _stopProgressTimer();
-      if (mounted) setState(() => _isProcessing = false);
+      _stopSaveTimer();
+      if (mounted) setState(() { _isProcessing = false; _saveProgress = 0.0; });
     }
   }
 
@@ -410,14 +421,14 @@ class _HomeScreenState extends State<HomeScreen> {
     final savePath = await _pickSavePath();
     if (savePath == null) return;
 
-    _startProgressTimer();
-    setState(() { _isProcessing = true; _progress = 0.0; });
+    _startSaveTimer();
+    setState(() { _isProcessing = true; _saveProgress = 0.0; });
     try {
       final imageBytes = await _getSelectedImageBytes();
       final stitchedBytes = await ImageStitcherService.stitchImages(
         imageBytes,
         mode: _stitchMode,
-        onProgress: (p) { _progress = p; },
+        onProgress: (p) { _saveProgress = p; },
         addBorder: _borderPercent > 0,
         borderColor: _borderUiColor,
         borderPercent: _borderPercent,
@@ -428,8 +439,8 @@ class _HomeScreenState extends State<HomeScreen> {
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('拼接失败: $e')));
     } finally {
-      _stopProgressTimer();
-      if (mounted) setState(() => _isProcessing = false);
+      _stopSaveTimer();
+      if (mounted) setState(() { _isProcessing = false; _saveProgress = 0.0; });
     }
   }
 
@@ -456,4 +467,14 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<List<Uint8List>> _getSelectedImageBytes() async => [for (var item in _selectedImages) await item.file.readAsBytes()];
+
+  /// 获取所有图片的缩略图字节，如果任意缩略图尚未生成则返回 null
+  Future<List<Uint8List>?> _getThumbnailBytes() async {
+    final result = <Uint8List>[];
+    for (var item in _selectedImages) {
+      if (item.thumbnailBytes == null) return null; // 缩略图还没生成
+      result.add(item.thumbnailBytes!);
+    }
+    return result;
+  }
 }

@@ -1,12 +1,15 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 class ImageItem {
   final File file;
   final String name;
+  Uint8List? thumbnailBytes;
 
   ImageItem({
     required this.file,
     required this.name,
+    this.thumbnailBytes,
   });
 }
 
