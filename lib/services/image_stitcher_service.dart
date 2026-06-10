@@ -15,7 +15,7 @@ class ImageStitcherService {
   /// [outputLossless] 为 true 时使用 PNG 无损编码，否则 JPEG
   /// [addBorder] 是否给每张图片添加边框
   /// [borderColor] 边框颜色
-  /// [borderWidth] 边框像素宽度
+  /// [borderPercent] 边框宽度占参考尺寸的百分比 (1.0-10.0)，水平模式参考高度，垂直模式参考宽度
   static Future<Uint8List> stitchImages(
     List<Uint8List> images, {
     required StitchMode mode,
@@ -26,7 +26,7 @@ class ImageStitcherService {
     bool outputLossless = true,
     bool addBorder = false,
     ui.Color borderColor = const ui.Color(0xFF000000),
-    int borderWidth = 2,
+    double borderPercent = 3.0,
   }) async {
     if (images.isEmpty) throw Exception('没有可拼接的图片');
     if (images.length == 1) return images.first;
@@ -53,12 +53,16 @@ class ImageStitcherService {
     log('计算画布尺寸...');
     int canvasWidth, canvasHeight;
     List<ui.Rect> dstRects;
-    final bw = addBorder ? borderWidth : 0;
+    int bw = 0;
 
     if (mode == StitchMode.horizontal) {
       int maxHeight = decodedImages.map((e) => e.height).reduce((a, b) => a > b ? a : b);
       int totalWidth = 0;
       dstRects = [];
+      if (addBorder) {
+        bw = (maxHeight * borderPercent / 100).round().clamp(1, 9999);
+        log('📐 边框宽度: $bw px (参考高度=${maxHeight}px, ${borderPercent}%)');
+      }
       for (var src in decodedImages) {
         final w = (src.width * maxHeight / src.height).round();
         dstRects.add(ui.Rect.fromLTWH(totalWidth.toDouble(), 0, w.toDouble(), maxHeight.toDouble()));
@@ -80,6 +84,10 @@ class ImageStitcherService {
       int maxWidth = decodedImages.map((e) => e.width).reduce((a, b) => a > b ? a : b);
       int totalHeight = 0;
       dstRects = [];
+      if (addBorder) {
+        bw = (maxWidth * borderPercent / 100).round().clamp(1, 9999);
+        log('📐 边框宽度: $bw px (参考宽度=${maxWidth}px, ${borderPercent}%)');
+      }
       for (var src in decodedImages) {
         final h = (src.height * maxWidth / src.width).round();
         dstRects.add(ui.Rect.fromLTWH(0, totalHeight.toDouble(), maxWidth.toDouble(), h.toDouble()));

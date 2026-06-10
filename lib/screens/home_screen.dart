@@ -22,9 +22,8 @@ class _HomeScreenState extends State<HomeScreen> {
   String? _resultPath;
 
   // 边框设置
-  bool _addBorder = false;
   int _borderColorIndex = 0; // 0=白色, 1=黑色
-  int _borderWidth = 10;
+  double _borderPercent = 0.0;
 
   // 预览数据
   Uint8List? _previewBytes;
@@ -223,42 +222,30 @@ class _HomeScreenState extends State<HomeScreen> {
       child: Padding(padding: const EdgeInsets.all(12), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         const Row(children: [Icon(Icons.border_style, size: 18, color: Colors.blue), SizedBox(width: 8), Text('图片边框', style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold))]),
         const SizedBox(height: 6),
-        // 开关
-        SwitchListTile(
-          dense: true,
-          contentPadding: EdgeInsets.zero,
-          title: const Text('添加边框', style: TextStyle(fontSize: 13)),
-          value: _addBorder,
-          onChanged: (v) => setState(() => _addBorder = v),
-        ),
-        if (_addBorder) ...[
-          // 颜色选择
-          Row(children: [
-            Text('颜色：', style: TextStyle(fontSize: 12, color: Colors.grey[700])),
-            const SizedBox(width: 8),
-            ...List.generate(2, (i) => Padding(
-              padding: const EdgeInsets.only(right: 6),
-              child: ChoiceChip(
-                label: Text(colorLabels[i], style: const TextStyle(fontSize: 12)),
-                selected: _borderColorIndex == i,
-                avatar: CircleAvatar(radius: 6, backgroundColor: colors[i]),
-                onSelected: (_) => setState(() => _borderColorIndex = i),
-              ),
-            )),
-          ]),
-          const SizedBox(height: 8),
-          // 边框宽度
-          Row(children: [
-            Text('粗细：', style: TextStyle(fontSize: 12, color: Colors.grey[700])),
-            Expanded(child: Slider(
-              value: _borderWidth.toDouble(),
-              min: 10, max: 100, divisions: 9,
-              label: '$_borderWidth px',
-              onChanged: (v) => setState(() => _borderWidth = v.round()),
-            )),
-            SizedBox(width: 36, child: Text('$_borderWidth px', style: const TextStyle(fontSize: 12))),
-          ]),
-        ],
+        Row(children: [
+          Text('颜色：', style: TextStyle(fontSize: 12, color: Colors.grey[700])),
+          const SizedBox(width: 8),
+          ...List.generate(2, (i) => Padding(
+            padding: const EdgeInsets.only(right: 6),
+            child: ChoiceChip(
+              label: Text(colorLabels[i], style: const TextStyle(fontSize: 12)),
+              selected: _borderColorIndex == i,
+              avatar: CircleAvatar(radius: 6, backgroundColor: colors[i]),
+              onSelected: (_) => setState(() => _borderColorIndex = i),
+            ),
+          )),
+        ]),
+        const SizedBox(height: 8),
+        Row(children: [
+          Text('粗细：', style: TextStyle(fontSize: 12, color: Colors.grey[700])),
+          Expanded(child: Slider(
+            value: _borderPercent,
+            min: 0, max: 10, divisions: 10,
+            label: '${_borderPercent.toInt()}%',
+            onChanged: (v) => setState(() => _borderPercent = v),
+          )),
+          SizedBox(width: 32, child: Text('${_borderPercent.toInt()}%', style: const TextStyle(fontSize: 12))),
+        ]),
       ])),
     );
   }
@@ -352,9 +339,9 @@ class _HomeScreenState extends State<HomeScreen> {
         mode: _stitchMode,
         onProgress: (p) => _progress = p,
         maxPreviewDim: 2048, // 预览缩放到最大边长2048，编码快10-50倍
-        addBorder: _addBorder,
+        addBorder: _borderPercent > 0,
         borderColor: _borderUiColor,
-        borderWidth: _borderWidth,
+        borderPercent: _borderPercent,
       );
       if (mounted) setState(() => _previewBytes = stitchedBytes);
     } catch (e) {
@@ -405,9 +392,9 @@ class _HomeScreenState extends State<HomeScreen> {
         mode: _stitchMode,
         onProgress: (p) => _progress = p,
         outputLossless: saveArgs.$2,
-        addBorder: _addBorder,
+        addBorder: _borderPercent > 0,
         borderColor: _borderUiColor,
-        borderWidth: _borderWidth,
+        borderPercent: _borderPercent,
       );
       await File(saveArgs.$1).writeAsBytes(fullResBytes);
       setState(() => _resultPath = saveArgs.$1);
@@ -435,9 +422,9 @@ class _HomeScreenState extends State<HomeScreen> {
         mode: _stitchMode,
         onProgress: (p) { _progress = p; },
         outputLossless: saveArgs.$2,
-        addBorder: _addBorder,
+        addBorder: _borderPercent > 0,
         borderColor: _borderUiColor,
-        borderWidth: _borderWidth,
+        borderPercent: _borderPercent,
       );
       await File(saveArgs.$1).writeAsBytes(stitchedBytes);
       setState(() => _resultPath = saveArgs.$1);
