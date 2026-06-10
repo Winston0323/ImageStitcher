@@ -379,9 +379,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _saveFromPreview() async {
     if (_selectedImages.length < 2) return;
-    // 先让用户选择保存路径和格式
-    final saveArgs = await _pickSavePathAndFormat();
-    if (saveArgs == null) return;
+    final savePath = await _pickSavePath();
+    if (savePath == null) return;
 
     _startProgressTimer();
     setState(() { _isProcessing = true; _progress = 0.0; });
@@ -391,14 +390,13 @@ class _HomeScreenState extends State<HomeScreen> {
         imageBytes,
         mode: _stitchMode,
         onProgress: (p) => _progress = p,
-        outputLossless: saveArgs.$2,
         addBorder: _borderPercent > 0,
         borderColor: _borderUiColor,
         borderPercent: _borderPercent,
       );
-      await File(saveArgs.$1).writeAsBytes(fullResBytes);
-      setState(() => _resultPath = saveArgs.$1);
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('已保存至: ${saveArgs.$1}'), duration: const Duration(seconds: 3)));
+      await File(savePath).writeAsBytes(fullResBytes);
+      setState(() => _resultPath = savePath);
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('已保存至: $savePath'), duration: const Duration(seconds: 3)));
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('保存失败: $e'), duration: const Duration(seconds: 5)));
     } finally {
@@ -409,9 +407,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _saveStitched() async {
     if (_selectedImages.length < 2) return;
-    // 先让用户选择保存路径和格式
-    final saveArgs = await _pickSavePathAndFormat();
-    if (saveArgs == null) return;
+    final savePath = await _pickSavePath();
+    if (savePath == null) return;
 
     _startProgressTimer();
     setState(() { _isProcessing = true; _progress = 0.0; });
@@ -421,14 +418,13 @@ class _HomeScreenState extends State<HomeScreen> {
         imageBytes,
         mode: _stitchMode,
         onProgress: (p) { _progress = p; },
-        outputLossless: saveArgs.$2,
         addBorder: _borderPercent > 0,
         borderColor: _borderUiColor,
         borderPercent: _borderPercent,
       );
-      await File(saveArgs.$1).writeAsBytes(stitchedBytes);
-      setState(() => _resultPath = saveArgs.$1);
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('已保存至: ${saveArgs.$1}'), duration: const Duration(seconds: 3)));
+      await File(savePath).writeAsBytes(stitchedBytes);
+      setState(() => _resultPath = savePath);
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('已保存至: $savePath'), duration: const Duration(seconds: 3)));
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('拼接失败: $e')));
     } finally {
@@ -447,17 +443,16 @@ class _HomeScreenState extends State<HomeScreen> {
     })), actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('完成'))]));
   }
 
-  /// 先让用户选择保存路径和格式，返回 (path, isLossless)
-  Future<(String, bool)?> _pickSavePathAndFormat() async {
+  /// 让用户选择保存路径，固定 PNG 格式
+  Future<String?> _pickSavePath() async {
     final savedPath = await FilePicker.platform.saveFile(
       dialogTitle: '保存拼接后的图片',
       fileName: 'stitched_${_stitchMode == StitchMode.horizontal ? "H" : "V"}_${DateTime.now().millisecondsSinceEpoch}.png',
       type: FileType.custom,
-      allowedExtensions: ['png', 'jpg'],
+      allowedExtensions: ['png'],
     );
     if (savedPath == null || savedPath.isEmpty) return null;
-    final isLossless = savedPath.toLowerCase().endsWith('.png');
-    return (savedPath, isLossless);
+    return savedPath;
   }
 
   Future<List<Uint8List>> _getSelectedImageBytes() async => [for (var item in _selectedImages) await item.file.readAsBytes()];

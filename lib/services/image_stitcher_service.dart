@@ -1,8 +1,6 @@
 import 'dart:async';
 import 'dart:ui' as ui;
-import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
-import 'package:ffi_jpeg_encode/ffi_jpeg_encode.dart';
 
 import '../models/image_item.dart';
 
@@ -11,19 +9,15 @@ class ImageStitcherService {
 
   /// 拼接多张图片
   /// [maxPreviewDim] 预览时限制最大边长（如2048），保存时传0表示不缩放
-  /// [jpegQuality] JPEG编码质量 (1-100)，默认95
-  /// [outputLossless] 为 true 时使用 PNG 无损编码，否则 JPEG
   /// [addBorder] 是否给每张图片添加边框
   /// [borderColor] 边框颜色
-  /// [borderPercent] 边框宽度占参考尺寸的百分比 (1.0-10.0)，水平模式参考高度，垂直模式参考宽度
+  /// [borderPercent] 边框宽度占参考尺寸的百分比 (0-10)，水平模式参考高度，垂直模式参考宽度
   static Future<Uint8List> stitchImages(
     List<Uint8List> images, {
     required StitchMode mode,
     void Function(double progress)? onProgress,
     void Function(String message)? onLog,
     int maxPreviewDim = 0,  // 0=原始尺寸, >0=缩放到此最大边长
-    int jpegQuality = 95,   // JPEG质量 1-100
-    bool outputLossless = true,
     bool addBorder = false,
     ui.Color borderColor = const ui.Color(0xFF000000),
     double borderPercent = 3.0,
@@ -191,61 +185,15 @@ class ImageStitcherService {
       onProgress?.call(0.88);
     }
 
-    // ========== Step 6: 编码导出 ==========
+    // ========== Step 6: PNG 编码导出 ==========
     final mp = (encodeImage.width * encodeImage.height / 1000000).toStringAsFixed(1);
-    final isPreview = maxPreviewDim > 0;
-    Uint8List outputBytes;
-
-    if (isPreview || scale < 1.0) {
-      // 预览模式 / 缩放过的小图 → 用 dart:ui 原生 PNG（稳定，无黑边风险）
-      log('PNG 编码中 ($mp MP, 预览模式)...');
-      onProgress?.call(0.90);
-      final pngByteData = await encodeImage.toByteData(format: ui.ImageByteFormat.png);
-      encodeImage.dispose();
-      if (pngByteData == null) throw Exception('PNG编码失败');
-      outputBytes = pngByteData.buffer.asUint8List(pngByteData.offsetInBytes, pngByteData.lengthInBytes);
-      log('✅ PNG 导出完成! 文件大小: ${(outputBytes.length / 1024).toStringAsFixed(1)} KB');
-    } else if (outputLossless) {
-      // 全尺寸无损保存 → PNG
-      log('PNG 无损编码中 ($mp MP)...');
-      onProgress?.call(0.90);
-      final pngByteData = await encodeImage.toByteData(format: ui.ImageByteFormat.png);
-      encodeImage.dispose();
-      if (pngByteData == null) throw Exception('PNG编码失败');
-      outputBytes = pngByteData.buffer.asUint8List(pngByteData.offsetInBytes, pngByteData.lengthInBytes);
-      log('✅ PNG 无损导出完成! 文件大小: ${(outputBytes.length / 1024).toStringAsFixed(1)} KB');
-    } else {
-      // 全尺寸保存模式 → 用 FFI+SIMD JPEG 加速（大图比PNG快5-20倍）
-      log('JPEG 编码中 ($mp MP, quality=$jpegQuality)...');
-      onProgress?.call(0.90);
-
-      // 获取原始 RGBA 像素数据（rawRgba 有 GPU 行跨度填充，需去除）
-      final byteData = await encodeImage.toByteData(format: ui.ImageByteFormat.rawRgba);
-      encodeImage.dispose();
-
-      if (byteData == null) throw Exception('像素读取失败');
-
-      final w = encodeImage.width;
-      final h = encodeImage.height;
-      final rowBytes = w * 4;
-      final stride = byteData.lengthInBytes ~/ h;
-      final tightPixels = Uint8List(w * h * 4);
-
-      if (stride == rowBytes) {
-        tightPixels.setAll(0, byteData.buffer.asUint8List(byteData.offsetInBytes, tightPixels.length));
-      } else {
-        final src = byteData.buffer.asUint8List(byteData.offsetInBytes);
-        for (int y = 0; y < h; y++) {
-          final srcOffset = y * stride;
-          final dstOffset = y * rowBytes;
-          tightPixels.setRange(dstOffset, dstOffset + rowBytes, src, srcOffset);
-        }
-        log('⚠️ 去除行跨度: stride=$stride rowBytes=$rowBytes');
-      }
-
-      outputBytes = encodeJpegToBytes(tightPixels, w, h, 4, quality: jpegQuality);
-      log('✅ JPEG 导出完成! 文件大小: ${(outputBytes.length / 1024).toStringAsFixed(1)} KB');
-    }
+    log('PNG 编码中 ($mp MP)...');
+    onProgress?.call(0.90);
+    final pngByteData = await encodeImage.toByteData(format: ui.ImageByteFormat.png);
+    encodeImage.dispose();
+    if (pngByteData == null) throw Exception('PNG编码失败');
+    final outputBytes = pngByteData.buffer.asUint8List(pngByteData.offsetInBytes, pngByteData.lengthInBytes);
+    log('✅ PNG 导出完成! 文件大小: ${(outputBytes.length / 1024).toStringAsFixed(1)} KB');
 
     onProgress?.call(1.0);
     log('═══ 全部完成，总耗时: ${sw.elapsedMilliseconds}ms ═══');
