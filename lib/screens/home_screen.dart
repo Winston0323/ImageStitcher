@@ -136,28 +136,33 @@ class _HomeScreenState extends State<HomeScreen> {
               alignment: Alignment.center,
               children: [
                 // 图片或占位
-                Container(
-                  color: Colors.grey[100],
-                  constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.65),
-                  child: _previewBytes != null
-                      ? InteractiveViewer(
-                          minScale: 0.15,
-                          maxScale: 8.0,
-                          boundaryMargin: const EdgeInsets.all(16),
-                          child: Center(
+                _previewBytes != null
+                    ? InteractiveViewer(
+                        minScale: 0.15,
+                        maxScale: 8.0,
+                        boundaryMargin: const EdgeInsets.all(16),
+                        child: Center(
+                          child: Container(
+                            color: Colors.grey[300],
                             child: Image.memory(_previewBytes!, fit: BoxFit.contain,
                               errorBuilder: (_, __, ___) => const Icon(Icons.broken_image, size: 64, color: Colors.redAccent)),
                           ),
-                        )
-                      : Center(
-                          child: Column(mainAxisSize: MainAxisSize.min, children: [
-                            Icon(Icons.image_outlined, size: 64, color: Colors.grey[350]),
-                            const SizedBox(height: 12),
-                            Text('选择 2 张以上图片后\n将在此显示预览',
-                                textAlign: TextAlign.center, style: TextStyle(fontSize: 14, color: Colors.grey[500], height: 1.5)),
-                          ]),
                         ),
-                ),
+                      )
+                    : Center(
+                        child: Container(
+                          color: Colors.grey[300],
+                          constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.65),
+                          child: Center(
+                            child: Column(mainAxisSize: MainAxisSize.min, children: [
+                              Icon(Icons.image_outlined, size: 64, color: Colors.grey[350]),
+                              const SizedBox(height: 12),
+                              Text('选择 2 张以上图片后\n将在此显示预览',
+                                  textAlign: TextAlign.center, style: TextStyle(fontSize: 14, color: Colors.grey[500], height: 1.5)),
+                            ]),
+                          ),
+                        ),
+                      ),
                 // 保存进度覆盖层
                 if (_saveProgress > 0)
                   Positioned.fill(
@@ -183,9 +188,8 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
           // 保存按钮（仅预览可用时显示）
           if (_previewBytes != null && !_isProcessing)
-            Container(
+            Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-              decoration: BoxDecoration(border: Border(top: BorderSide(color: Colors.grey.shade200))),
               child: FilledButton.icon(onPressed: _saveFromPreview, icon: const Icon(Icons.save, size: 18), label: const Text('保存此图片'), style: FilledButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 10))),
             ),
         ],
