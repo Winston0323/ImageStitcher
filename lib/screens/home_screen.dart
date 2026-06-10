@@ -215,8 +215,9 @@ class _HomeScreenState extends State<HomeScreen> {
   );
 
   Widget _buildBorderSelector() {
-    final colors = [Colors.white, Colors.black];
-    final colorLabels = ['白色', '黑色'];
+    final colors = [Colors.white, Colors.black, null];
+    final colorLabels = ['白色', '黑色', '彩虹'];
+    final colorIcons = [null, null, Icons.gradient];
 
     return Card(
       child: Padding(padding: const EdgeInsets.all(12), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -225,12 +226,16 @@ class _HomeScreenState extends State<HomeScreen> {
         Row(children: [
           Text('颜色：', style: TextStyle(fontSize: 12, color: Colors.grey[700])),
           const SizedBox(width: 8),
-          ...List.generate(2, (i) => Padding(
+          ...List.generate(3, (i) => Padding(
             padding: const EdgeInsets.only(right: 6),
             child: ChoiceChip(
-              label: Text(colorLabels[i], style: const TextStyle(fontSize: 12)),
+              label: Row(mainAxisSize: MainAxisSize.min, children: [
+                if (colorIcons[i] != null) Icon(colorIcons[i], size: 14),
+                if (colors[i] != null) CircleAvatar(radius: 6, backgroundColor: colors[i]),
+                const SizedBox(width: 4),
+                Text(colorLabels[i], style: const TextStyle(fontSize: 12)),
+              ]),
               selected: _borderColorIndex == i,
-              avatar: CircleAvatar(radius: 6, backgroundColor: colors[i]),
               onSelected: (_) => setState(() => _borderColorIndex = i),
             ),
           )),
@@ -341,7 +346,12 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  Color get _borderUiColor => _borderColorIndex == 0 ? Colors.white : Colors.black;
+  Color get _borderUiColor {
+    if (_borderColorIndex == 0) return Colors.white;
+    if (_borderColorIndex == 1) return Colors.black;
+    return Colors.black; // 彩虹模式下 borderColor 不会实际使用
+  }
+  bool get _isRainbowBorder => _borderColorIndex == 2;
 
   Future<void> _autoPreview() async {
     if (_selectedImages.length < 2) return; // 保留旧预览，不清空
@@ -356,6 +366,7 @@ class _HomeScreenState extends State<HomeScreen> {
         addBorder: _borderPercent > 0,
         borderColor: _borderUiColor,
         borderPercent: _borderPercent,
+        rainbowBorder: _isRainbowBorder,
       );
       if (mounted) setState(() => _previewBytes = stitchedBytes);
     } catch (e) {
@@ -404,6 +415,7 @@ class _HomeScreenState extends State<HomeScreen> {
         addBorder: _borderPercent > 0,
         borderColor: _borderUiColor,
         borderPercent: _borderPercent,
+        rainbowBorder: _isRainbowBorder,
       );
       await File(savePath).writeAsBytes(fullResBytes);
       setState(() => _resultPath = savePath);
@@ -432,6 +444,7 @@ class _HomeScreenState extends State<HomeScreen> {
         addBorder: _borderPercent > 0,
         borderColor: _borderUiColor,
         borderPercent: _borderPercent,
+        rainbowBorder: _isRainbowBorder,
       );
       await File(savePath).writeAsBytes(stitchedBytes);
       setState(() => _resultPath = savePath);

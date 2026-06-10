@@ -11,8 +11,9 @@ class ImageStitcherService {
   /// 拼接多张图片
   /// [maxPreviewDim] 预览时限制最大边长（如2048），保存时传0表示不缩放
   /// [addBorder] 是否给每张图片添加边框
-  /// [borderColor] 边框颜色
+  /// [borderColor] 边框颜色（rainbowBorder=true 时无效）
   /// [borderPercent] 边框宽度占参考尺寸的百分比 (0-10)，水平模式参考高度，垂直模式参考宽度
+  /// [rainbowBorder] 是否使用左上到右下的 hue 渐变彩虹边框
   static Future<Uint8List> stitchImages(
     List<Uint8List> images, {
     required StitchMode mode,
@@ -22,6 +23,7 @@ class ImageStitcherService {
     bool addBorder = false,
     ui.Color borderColor = const ui.Color(0xFF000000),
     double borderPercent = 3.0,
+    bool rainbowBorder = false,
   }) async {
     if (images.isEmpty) throw Exception('没有可拼接的图片');
     if (images.length == 1) return images.first;
@@ -131,14 +133,74 @@ class ImageStitcherService {
       final dst = dstRects[i];
 
       if (addBorder) {
-        // 在图片下方绘制边框（比图片略大一圈）
-        canvas.drawRect(
-          ui.Rect.fromLTWH(
-            dst.left - bw, dst.top - bw,
-            dst.width + 2 * bw, dst.height + 2 * bw,
-          ),
-          ui.Paint()..color = borderColor,
+        final borderRect = ui.Rect.fromLTWH(
+          dst.left - bw, dst.top - bw,
+          dst.width + 2 * bw, dst.height + 2 * bw,
         );
+        if (rainbowBorder) {
+          // 按像素在画布上的位置计算颜色，左上角→右下角 hue 渐变
+          final rainbowColors = [
+            const ui.Color(0xFFFF0000),
+            const ui.Color(0xFFFF7F00),
+            const ui.Color(0xFFFFFF00),
+            const ui.Color(0xFF00FF00),
+            const ui.Color(0xFF0000FF),
+            const ui.Color(0xFF4B0082),
+            const ui.Color(0xFF8B00FF),
+          ];
+          final nColors = rainbowColors.length;
+          final denom = (canvasWidth + canvasHeight).toDouble();
+          // 网格化：水平 256 列 × 竖向 (按边框宽度自适应行数，最多 256)
+          final stepsX = 256;
+          final cellW = borderRect.width / stepsX;
+          final stepsY = math.min(bw, 256).clamp(1, 256);
+          if (stepsY < 1) {
+            // 边框太窄，画一条即可
+            final cx = borderRect.center.dx;
+            final cy = borderRect.center.dy;
+            final t = denom > 0 ? (cx + cy) / denom : 0.0;
+            final pos = t * (nColors - 1);
+            final ci = pos.floor().clamp(0, nColors - 2);
+            final frac = pos - ci;
+            final c0 = rainbowColors[ci];
+            final c1 = rainbowColors[ci + 1];
+            final r = c0.r * (1 - frac) + c1.r * frac;
+            final g = c0.g * (1 - frac) + c1.g * frac;
+            final b = c0.b * (1 - frac) + c1.b * frac;
+            canvas.drawRect(borderRect, ui.Paint()..color = ui.Color.from(
+              alpha: 1.0, red: r * 0.75 + 0.25, green: g * 0.75 + 0.25, blue: b * 0.75 + 0.25,
+            ));
+          } else {
+            final cellH = borderRect.height / stepsY;
+            for (int sx = 0; sx < stepsX; sx++) {
+              for (int sy = 0; sy < stepsY; sy++) {
+                final gx = borderRect.left + (sx + 0.5) * cellW;
+                final gy = borderRect.top + (sy + 0.5) * cellH;
+                final t = denom > 0 ? (gx + gy) / denom : 0.0;
+                final pos = t * (nColors - 1);
+                final ci = pos.floor().clamp(0, nColors - 2);
+                final frac = pos - ci;
+                final c0 = rainbowColors[ci];
+                final c1 = rainbowColors[ci + 1];
+                final r = c0.r * (1 - frac) + c1.r * frac;
+                final g = c0.g * (1 - frac) + c1.g * frac;
+                final b = c0.b * (1 - frac) + c1.b * frac;
+                canvas.drawRect(
+                  ui.Rect.fromLTWH(borderRect.left + sx * cellW, borderRect.top + sy * cellH,
+                    cellW.ceilToDouble(), cellH.ceilToDouble()),
+                  ui.Paint()..color = ui.Color.from(
+                    alpha: 1.0, red: r * 0.75 + 0.25, green: g * 0.75 + 0.25, blue: b * 0.75 + 0.25,
+                  ),
+                );
+              }
+            }
+          }
+        } else {
+          canvas.drawRect(
+            borderRect,
+            ui.Paint()..color = borderColor,
+          );
+        }
       }
 
       canvas.drawImageRect(
