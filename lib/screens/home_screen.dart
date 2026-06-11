@@ -47,10 +47,6 @@ class _HomeScreenState extends State<HomeScreen> {
       _buildAddButton(),
       const SizedBox(height: 12),
       _buildImageList(),
-      if (hasImages && _selectedImages.length >= 2) ...[
-        const SizedBox(height: 12),
-        _buildActionButtons(),
-      ],
       const SizedBox(height: 16),
       if (_resultPath != null) ...[
         _buildResultSection(),
@@ -216,10 +212,6 @@ class _HomeScreenState extends State<HomeScreen> {
         if (_selectedImages.isNotEmpty) ...[
           _buildImageList(),
           const SizedBox(height: 8),
-          if (_selectedImages.length >= 2) ...[
-            _buildActionButtons(),
-            const SizedBox(height: 8),
-          ],
         ],
       ConstrainedBox(
         constraints: BoxConstraints(
@@ -244,7 +236,7 @@ class _HomeScreenState extends State<HomeScreen> {
         SegmentedButton<StitchMode>(segments: const [
           ButtonSegment(value: StitchMode.horizontal, label: Text('水平'), icon: Icon(Icons.view_column, size: 18)),
           ButtonSegment(value: StitchMode.vertical, label: Text('垂直'), icon: Icon(Icons.view_stream, size: 18)),
-        ], selected: {_stitchMode}, onSelectionChanged: (selection) { setState(() => _stitchMode = selection.first); }),
+        ], selected: {_stitchMode}, onSelectionChanged: (selection) { setState(() => _stitchMode = selection.first); _autoPreview(); }),
         _modeHint(_stitchMode == StitchMode.horizontal ? '按宽度对齐，横向排列（统一高度）' : '按长度对齐，纵向排列（统一宽度）'),
       ])),
     );
@@ -277,7 +269,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 Text(colorLabels[i], style: const TextStyle(fontSize: 12)),
               ]),
               selected: _borderColorIndex == i,
-              onSelected: (_) => setState(() => _borderColorIndex = i),
+              onSelected: (_) => setState(() { _borderColorIndex = i; _autoPreview(); }),
             ),
           )),
         ]),
@@ -289,6 +281,7 @@ class _HomeScreenState extends State<HomeScreen> {
             min: 0, max: 10, divisions: 10,
             label: '${_borderPercent.toInt()}%',
             onChanged: (v) => setState(() => _borderPercent = v),
+            onChangeEnd: (_) => _autoPreview(),
           )),
           SizedBox(width: 32, child: Text('${_borderPercent.toInt()}%', style: const TextStyle(fontSize: 12))),
         ]),
@@ -326,11 +319,11 @@ class _HomeScreenState extends State<HomeScreen> {
       const SizedBox(height: 6),
       ConstrainedBox(constraints: BoxConstraints(maxHeight: 300), child: ListView.builder(shrinkWrap: true, primary: false, physics: const NeverScrollableScrollPhysics(), itemCount: _selectedImages.length, itemBuilder: (context, index) {
         final item = _selectedImages[index];
-        return Dismissible(key: ValueKey(item.file.path), direction: DismissDirection.endToStart, onDismissed: (_) { setState(() => _selectedImages.removeAt(index)); },
+        return Dismissible(key: ValueKey(item.file.path), direction: DismissDirection.endToStart, onDismissed: (_) { setState(() => _selectedImages.removeAt(index)); _autoPreview(); },
           background: Container(alignment: Alignment.centerRight, margin: const EdgeInsets.symmetric(vertical: 2), padding: const EdgeInsets.only(right: 12), color: Colors.red, child: const Icon(Icons.delete, color: Colors.white)),
           child: ListTile(contentPadding: const EdgeInsets.symmetric(horizontal: 6), dense: true, leading: ClipRRect(borderRadius: BorderRadius.circular(4), child: Image.file(item.file, width: 44, height: 44, fit: BoxFit.cover, errorBuilder: (_, __, ___) => _placeholderIcon())),
             title: Text(item.name, overflow: TextOverflow.ellipsis, maxLines: 1, style: const TextStyle(fontSize: 13)), subtitle: Text('#${index + 1}', style: const TextStyle(fontSize: 11, color: Colors.blue, fontWeight: FontWeight.w600)),
-            trailing: IconButton(iconSize: 18, icon: const Icon(Icons.remove_circle_outline, color: Colors.redAccent), onPressed: () => setState(() => _selectedImages.removeAt(index))),
+            trailing: IconButton(iconSize: 18, icon: const Icon(Icons.remove_circle_outline, color: Colors.redAccent), onPressed: () => setState(() { _selectedImages.removeAt(index); _autoPreview(); })),
         ));
       })),
     ])));
@@ -345,13 +338,6 @@ class _HomeScreenState extends State<HomeScreen> {
       SelectableText(_resultPath!, style: const TextStyle(fontSize: 11, fontFamily: 'monospace')),
     ])));
 
-  Widget _buildActionButtons() => Card(
-    child: Padding(padding: const EdgeInsets.all(12), child: Row(children: [
-      Expanded(child: FilledButton.icon(onPressed: (_selectedImages.length < 2 || _isProcessing) ? null : _autoPreview, icon: const Icon(Icons.preview, size: 18), label: Text(_isProcessing ? '处理中...' : '生成预览'), style: FilledButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 10)))),
-      const SizedBox(width: 10),
-      Expanded(child: FilledButton.tonal(onPressed: (_selectedImages.length < 2 || _isProcessing) ? null : _saveStitched, style: FilledButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 10)), child: const Row(mainAxisAlignment: MainAxisAlignment.center, children: [Icon(Icons.save_alt, size: 18), SizedBox(width: 6), Text('保存图片')]))),
-    ])));
-
   Widget _placeholderIcon() => Container(width: 44, height: 44, color: Colors.grey[200], child: const Icon(Icons.image, color: Colors.grey, size: 22));
 
   // ========== 核心功能 ==========
@@ -362,26 +348,30 @@ class _HomeScreenState extends State<HomeScreen> {
         // Android: 使用原生相册选取（多选）
         final images = await ImagePicker().pickMultiImage();
         if (images.isEmpty) return;
+        final tasks = <Future<void>>[];
         for (var xFile in images) {
           final item = ImageItem(file: File(xFile.path), name: xFile.name);
           setState(() => _selectedImages.add(item));
-          _generateThumbnail(item);
+          tasks.add(_generateThumbnail(item));
         }
         if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('已添加 ${images.length} 张图片'), duration: const Duration(seconds: 1)));
+        // 等所有缩略图生成完再自动预览
+        await Future.wait(tasks);
         if (_selectedImages.length >= 2) _autoPreview();
       } else {
         // 其他平台：使用 file_picker
         final result = await FilePicker.platform.pickFiles(type: FileType.custom, allowedExtensions: ['jpg', 'jpeg', 'png', 'bmp', 'webp', 'gif'], allowMultiple: true);
         if (result == null || result.files.isEmpty) return;
+        final tasks = <Future<void>>[];
         for (var file in result.files) {
           if (file.path == null) continue;
           final item = ImageItem(file: File(file.path!), name: file.name ?? '');
           setState(() => _selectedImages.add(item));
-          // 异步生成缩略图
-          _generateThumbnail(item);
+          tasks.add(_generateThumbnail(item));
         }
         if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('已添加 ${result.files.length} 张图片'), duration: const Duration(seconds: 1)));
-        // 自动生成预览
+        // 等所有缩略图生成完再自动预览
+        await Future.wait(tasks);
         if (_selectedImages.length >= 2) _autoPreview();
       }
     } catch (e) {
@@ -486,38 +476,6 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  Future<void> _saveStitched() async {
-    if (_selectedImages.length < 2) return;
-    _startSaveTimer();
-    setState(() { _isProcessing = true; _saveProgress = 0.0; });
-    try {
-      final imageBytes = await _getSelectedImageBytes();
-      final stitchedBytes = await ImageStitcherService.stitchImages(
-        imageBytes,
-        mode: _stitchMode,
-        onProgress: (p) { _saveProgress = p; },
-        addBorder: _borderPercent > 0,
-        borderColor: _borderUiColor,
-        borderPercent: _borderPercent,
-        rainbowBorder: _isRainbowBorder,
-      );
-      if (Platform.isAndroid || Platform.isIOS) {
-        await _saveToDeviceAlbum(stitchedBytes);
-      } else {
-        final savePath = await _pickSavePath(bytes: stitchedBytes);
-        if (savePath == null) return;
-        await _writeBytesToPath(stitchedBytes, savePath);
-        setState(() => _resultPath = savePath);
-        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('已保存至: $savePath'), duration: const Duration(seconds: 3)));
-      }
-    } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('拼接失败: $e')));
-    } finally {
-      _stopSaveTimer();
-      if (mounted) setState(() { _isProcessing = false; _saveProgress = 0.0; });
-    }
-  }
-
   /// 保存图片到系统相册的 Stitcher 相簿中（Android/iOS）
   Future<void> _saveToDeviceAlbum(Uint8List bytes) async {
     await Gal.putImageBytes(bytes, album: 'Stitcher');
@@ -532,7 +490,7 @@ class _HomeScreenState extends State<HomeScreen> {
   void _reorderImages() {
     final reordered = List<ImageItem>.from(_selectedImages);
     showDialog(context: context, builder: (ctx) => AlertDialog(title: const Row(children: [Icon(Icons.sort, size: 20), SizedBox(width: 8), Text('调整图片顺序')]), content: SizedBox(width: double.maxFinite, height: 320,     child: ReorderableListView.builder(shrinkWrap: true, itemCount: reordered.length, onReorder: (oldIndex, newIndex) {
-      setState(() { if (newIndex > oldIndex) newIndex--; final item = reordered.removeAt(oldIndex); reordered.insert(newIndex, item); _selectedImages.clear(); _selectedImages.addAll(reordered); });
+      setState(() { if (newIndex > oldIndex) newIndex--; final item = reordered.removeAt(oldIndex); reordered.insert(newIndex, item); _selectedImages.clear(); _selectedImages.addAll(reordered); }); _autoPreview();
     }, itemBuilder: (ctx, index) {
       final item = reordered[index];
       return ListTile(key: ValueKey(item.file.path), dense: true, contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2), leading: CircleAvatar(radius: 14, backgroundColor: Theme.of(ctx).colorScheme.primary, foregroundColor: Colors.white, child: Text('${index + 1}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold))), title: Text(item.name, overflow: TextOverflow.ellipsis, maxLines: 1, style: const TextStyle(fontSize: 13)), trailing: const Icon(Icons.drag_handle, color: Colors.grey, size: 20));
