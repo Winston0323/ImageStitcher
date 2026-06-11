@@ -40,13 +40,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final isWide = MediaQuery.of(context).size.width >= 600;
 
     final panel = <Widget>[
-      _buildModeSelector(),
-      const SizedBox(height: 12),
-      _buildBorderSelector(),
-      const SizedBox(height: 12),
-      _buildAddButton(),
-      const SizedBox(height: 12),
-      _buildImageList(),
+      _buildBottomToolbar(),
       const SizedBox(height: 16),
       if (_resultPath != null) ...[
         _buildResultSection(),
@@ -67,13 +61,7 @@ class _HomeScreenState extends State<HomeScreen> {
               Expanded(
                 flex: 1,
                 child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-                  _buildModeSelector(),
-                  const SizedBox(height: 6),
-                  _buildBorderSelector(),
-                  const SizedBox(height: 6),
-                  _buildAddButton(),
-                  const SizedBox(height: 6),
-                  _buildImageList(),
+                  _buildBottomToolbar(),
                   if (_resultPath != null) ...[
                     const SizedBox(height: 6),
                     _buildResultSection(),
@@ -313,16 +301,8 @@ class _HomeScreenState extends State<HomeScreen> {
           child: _buildPreviewPanel(),
         ),
         const SizedBox(height: 8),
-        _buildModeSelector(),
+        _buildBottomToolbar(),
         const SizedBox(height: 8),
-        _buildBorderSelector(),
-        const SizedBox(height: 8),
-        _buildAddButton(),
-        const SizedBox(height: 8),
-        if (_selectedImages.isNotEmpty) ...[
-          _buildImageList(),
-          const SizedBox(height: 8),
-        ],
       if (_resultPath != null) ...[
         const SizedBox(height: 8),
         _buildResultSection(),
@@ -349,13 +329,7 @@ class _HomeScreenState extends State<HomeScreen> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             mainAxisSize: MainAxisSize.min,
             children: [
-              _buildModeSelector(),
-              const SizedBox(height: 2),
-              _buildBorderSelector(),
-              const SizedBox(height: 6),
-              _buildAddButton(),
-              const SizedBox(height: 4),
-              if (_selectedImages.isNotEmpty) _buildImageList(),
+              _buildBottomToolbar(),
               if (_resultPath != null) ...[
                 const SizedBox(height: 4),
                 _buildResultSection(),
@@ -364,6 +338,339 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         ),
       ],
+    );
+  }
+
+  // ========== 底部工具栏 ==========
+
+  /// 一排三个按钮：拼接模式、边框、选择图片
+  Widget _buildBottomToolbar() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      child: Row(
+        children: [
+          Expanded(
+            child: _toolbarButton(
+              icon: Icons.settings_suggest,
+              label: '拼接模式',
+              subtitle: _stitchMode == StitchMode.horizontal ? '水平' : '垂直',
+              onTap: _showModeSheet,
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: _toolbarButton(
+              icon: Icons.border_style,
+              label: '边框',
+              subtitle: _borderPercent > 0
+                  ? '${_borderColorIndex == 0 ? "白色" : _borderColorIndex == 1 ? "黑色" : "彩虹"} ${_borderPercent.toInt()}%'
+                  : '无',
+              onTap: _showBorderSheet,
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: _toolbarButton(
+              icon: Icons.add_photo_alternate_outlined,
+              label: '选择图片',
+              subtitle: _selectedImages.isEmpty ? '添加' : '${_selectedImages.length}张',
+              onTap: _showImageSheet,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _toolbarButton({
+    required IconData icon,
+    required String label,
+    required String subtitle,
+    required VoidCallback onTap,
+  }) {
+    return Material(
+      color: Theme.of(context).colorScheme.surfaceContainerHighest.withValues(alpha: 0.6),
+      borderRadius: BorderRadius.circular(12),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+          child: Row(
+            children: [
+              Icon(icon, size: 20, color: Theme.of(context).colorScheme.primary),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(label, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+                    const SizedBox(height: 2),
+                    Text(subtitle, style: TextStyle(fontSize: 10, color: Colors.grey[600])),
+                  ],
+                ),
+              ),
+              Icon(Icons.expand_less, size: 18, color: Colors.grey[500]),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ========== 底部弹出面板 ==========
+
+  void _showModeSheet() {
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheetState) => Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: Container(
+                  width: 40, height: 4,
+                  decoration: BoxDecoration(color: Colors.grey[300], borderRadius: BorderRadius.circular(2)),
+                ),
+              ),
+              const SizedBox(height: 16),
+              const Row(children: [
+                Icon(Icons.settings_suggest, size: 20, color: Colors.blue),
+                SizedBox(width: 8),
+                Text('拼接模式', style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
+              ]),
+              const SizedBox(height: 16),
+              SegmentedButton<StitchMode>(
+                segments: const [
+                  ButtonSegment(value: StitchMode.horizontal, label: Text('水平'), icon: Icon(Icons.view_column, size: 18)),
+                  ButtonSegment(value: StitchMode.vertical, label: Text('垂直'), icon: Icon(Icons.view_stream, size: 18)),
+                ],
+                selected: {_stitchMode},
+                onSelectionChanged: (selection) {
+                  setState(() => _stitchMode = selection.first);
+                  setSheetState(() {});
+                  _autoPreview();
+                },
+              ),
+              const SizedBox(height: 8),
+              _modeHint(_stitchMode == StitchMode.horizontal
+                  ? '按宽度对齐，横向排列（统一高度）'
+                  : '按长度对齐，纵向排列（统一宽度）'),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showBorderSheet() {
+    final colors = [Colors.white, Colors.black, null];
+    final colorLabels = ['白色', '黑色', '彩虹'];
+    final colorIcons = [null, null, Icons.gradient];
+
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheetState) => Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: Container(
+                  width: 40, height: 4,
+                  decoration: BoxDecoration(color: Colors.grey[300], borderRadius: BorderRadius.circular(2)),
+                ),
+              ),
+              const SizedBox(height: 16),
+              const Row(children: [
+                Icon(Icons.border_style, size: 20, color: Colors.blue),
+                SizedBox(width: 8),
+                Text('图片边框', style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
+              ]),
+              const SizedBox(height: 16),
+              Text('颜色：', style: TextStyle(fontSize: 13, color: Colors.grey[700])),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                children: List.generate(3, (i) => ChoiceChip(
+                  label: Row(mainAxisSize: MainAxisSize.min, children: [
+                    if (colorIcons[i] != null) Icon(colorIcons[i], size: 14),
+                    if (colors[i] != null)
+                      Padding(
+                        padding: const EdgeInsets.only(right: 2),
+                        child: CircleAvatar(radius: 6, backgroundColor: colors[i]),
+                      ),
+                    Text(colorLabels[i], style: const TextStyle(fontSize: 12)),
+                  ]),
+                  selected: _borderColorIndex == i,
+                  onSelected: (_) {
+                    setState(() => _borderColorIndex = i);
+                    setSheetState(() {});
+                    _autoPreview();
+                  },
+                )),
+              ),
+              const SizedBox(height: 16),
+              Row(children: [
+                Text('粗细：', style: TextStyle(fontSize: 13, color: Colors.grey[700])),
+                Expanded(child: Slider(
+                  value: _borderPercent,
+                  min: 0, max: 10, divisions: 10,
+                  label: '${_borderPercent.toInt()}%',
+                  onChanged: (v) {
+                    setState(() => _borderPercent = v);
+                    setSheetState(() {});
+                  },
+                  onChangeEnd: (_) => _autoPreview(),
+                )),
+                SizedBox(width: 32, child: Text('${_borderPercent.toInt()}%', style: const TextStyle(fontSize: 12))),
+              ]),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showImageSheet() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheetState) => DraggableScrollableSheet(
+          initialChildSize: _selectedImages.isEmpty ? 0.3 : 0.5,
+          minChildSize: 0.25,
+          maxChildSize: 0.85,
+          expand: false,
+          builder: (context, scrollController) => Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+            child: Column(
+              children: [
+                Center(
+                  child: Container(
+                    width: 40, height: 4,
+                    decoration: BoxDecoration(color: Colors.grey[300], borderRadius: BorderRadius.circular(2)),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                const Row(children: [
+                  Icon(Icons.add_photo_alternate_outlined, size: 20, color: Colors.blue),
+                  SizedBox(width: 8),
+                  Text('选择图片', style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
+                ]),
+                const SizedBox(height: 16),
+                // 添加按钮
+                SizedBox(
+                  width: double.infinity,
+                  height: 48,
+                  child: FilledButton.icon(
+                    onPressed: () {
+                      Navigator.pop(ctx);
+                      _pickImages();
+                    },
+                    icon: const Icon(Icons.add_photo_alternate_outlined),
+                    label: const Text('从相册选择图片'),
+                  ),
+                ),
+                if (_selectedImages.isNotEmpty) ...[
+                  const SizedBox(height: 16),
+                  Row(
+                    children: [
+                      Text('已选 ${_selectedImages.length} 张',
+                          style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold)),
+                      const Spacer(),
+                      TextButton.icon(
+                        onPressed: () {
+                          Navigator.pop(ctx);
+                          _reorderImages();
+                        },
+                        icon: const Icon(Icons.swap_vert, size: 16),
+                        label: const Text('排序', style: TextStyle(fontSize: 13)),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Expanded(
+                    child: ListView.builder(
+                      controller: scrollController,
+                      itemCount: _selectedImages.length,
+                      itemBuilder: (_, index) {
+                        final item = _selectedImages[index];
+                        return Dismissible(
+                          key: ValueKey('sheet_${item.file.path}'),
+                          direction: DismissDirection.endToStart,
+                          onDismissed: (_) {
+                            setState(() => _selectedImages.removeAt(index));
+                            setSheetState(() {});
+                            _autoPreview();
+                          },
+                          background: Container(
+                            alignment: Alignment.centerRight,
+                            margin: const EdgeInsets.symmetric(vertical: 2),
+                            padding: const EdgeInsets.only(right: 12),
+                            decoration: BoxDecoration(
+                              color: Colors.red,
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: const Icon(Icons.delete, color: Colors.white),
+                          ),
+                          child: ListTile(
+                            contentPadding: const EdgeInsets.symmetric(horizontal: 6),
+                            dense: true,
+                            leading: ClipRRect(
+                              borderRadius: BorderRadius.circular(4),
+                              child: Image.file(item.file, width: 44, height: 44,
+                                  fit: BoxFit.cover,
+                                  errorBuilder: (_, __, ___) => _placeholderIcon()),
+                            ),
+                            title: Text(item.name, overflow: TextOverflow.ellipsis, maxLines: 1,
+                                style: const TextStyle(fontSize: 13)),
+                            subtitle: Text('#${index + 1}',
+                                style: const TextStyle(fontSize: 11, color: Colors.blue, fontWeight: FontWeight.w600)),
+                            trailing: IconButton(
+                              iconSize: 18,
+                              icon: const Icon(Icons.remove_circle_outline, color: Colors.redAccent),
+                              onPressed: () {
+                                setState(() => _selectedImages.removeAt(index));
+                                setSheetState(() {});
+                                _autoPreview();
+                              },
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                ] else ...[
+                  const SizedBox(height: 24),
+                  Center(
+                    child: Column(children: [
+                      Icon(Icons.image_not_supported_outlined, size: 48, color: Colors.grey[350]),
+                      const SizedBox(height: 12),
+                      Text('还没有选择任何图片', style: TextStyle(fontSize: 14, color: Colors.grey[500])),
+                    ]),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 

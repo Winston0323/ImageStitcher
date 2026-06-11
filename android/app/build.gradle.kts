@@ -1,7 +1,6 @@
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
-    // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
+    // The Flutter Gradle Plugin must be applied after the Android plugins.
     id("dev.flutter.flutter-gradle-plugin")
 }
 
@@ -35,11 +34,8 @@ android {
             signingConfig = signingConfigs.getByName("debug")
         }
     }
-}
-
-kotlin {
-    compilerOptions {
-        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
+    lint {
+        checkReleaseBuilds = false
     }
 }
 

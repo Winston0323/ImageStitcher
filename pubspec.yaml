@@ -17,7 +17,7 @@ dependencies:
   path_provider: ^2.1.0
   
   # Android 原生相册选取
-  image_picker: ^1.1.2
+  image_picker: ^1.2.1
   
   # 保存图片到系统相册（自定义相簿）
   gal: ^2.3.0
