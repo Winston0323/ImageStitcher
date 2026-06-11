@@ -14,7 +14,8 @@ dependencies:
   
   # 文件选择与保存（跨平台）
   file_picker: ^8.0.0
-  
+  path_provider: ^2.1.0
+
 
   
   # UI 组件

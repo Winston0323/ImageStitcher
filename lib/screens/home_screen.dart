@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
+import 'package:path_provider/path_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import '../models/image_item.dart';
@@ -34,6 +35,48 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     final hasImages = _selectedImages.isNotEmpty;
+    final isWide = MediaQuery.of(context).size.width >= 600;
+
+    final panel = <Widget>[
+      _buildModeSelector(),
+      const SizedBox(height: 12),
+      _buildBorderSelector(),
+      const SizedBox(height: 12),
+      _buildAddButton(),
+      const SizedBox(height: 12),
+      _buildImageList(),
+      if (hasImages && _selectedImages.length >= 2) ...[
+        const SizedBox(height: 12),
+        _buildActionButtons(),
+      ],
+      const SizedBox(height: 16),
+      if (_resultPath != null) ...[
+        _buildResultSection(),
+        const SizedBox(height: 12),
+      ],
+    ];
+
+    Widget body;
+    if (isWide) {
+      body = Padding(
+        padding: const EdgeInsets.all(12),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(flex: 1, child: SingleChildScrollView(child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: panel))),
+            const SizedBox(width: 12),
+            Container(width: 1, color: Colors.grey.shade300),
+            const SizedBox(width: 12),
+            Expanded(flex: 2, child: _buildPreviewPanel()),
+          ],
+        ),
+      );
+    } else {
+      body = SingleChildScrollView(
+        padding: const EdgeInsets.all(8),
+        child: _buildNarrowLayout(),
+      );
+    }
 
     return Scaffold(
       appBar: AppBar(
@@ -51,49 +94,7 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
         ],
       ),
-      body: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // 左侧面板
-            Expanded(
-              flex: 1,
-              child: SingleChildScrollView(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    _buildModeSelector(),
-                    const SizedBox(height: 12),
-                    _buildBorderSelector(),
-                    const SizedBox(height: 12),
-                    _buildAddButton(),
-                    const SizedBox(height: 12),
-                    _buildImageList(),
-                    if (hasImages && _selectedImages.length >= 2) ...[
-                      const SizedBox(height: 12),
-                      _buildActionButtons(),
-                    ],
-                    const SizedBox(height: 16),
-                    if (_resultPath != null) ...[
-                      _buildResultSection(),
-                      const SizedBox(height: 12),
-                    ],
-                  ],
-                ),
-              ),
-            ),
-
-            // 分隔线
-            const SizedBox(width: 12),
-            Container(width: 1, color: Colors.grey.shade300),
-            const SizedBox(width: 12),
-
-            // 右侧预览区 — 常驻
-            Expanded(flex: 2, child: _buildPreviewPanel()),
-          ],
-        ),
-      ),
+      body: body,
     );
   }
 
@@ -199,6 +200,40 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // ========== 组件方法 ==========
 
+  Widget _buildNarrowLayout() {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _buildModeSelector(),
+        const SizedBox(height: 8),
+        _buildBorderSelector(),
+        const SizedBox(height: 8),
+        _buildAddButton(),
+        const SizedBox(height: 8),
+        if (_selectedImages.isNotEmpty) ...[
+          _buildImageList(),
+          const SizedBox(height: 8),
+          if (_selectedImages.length >= 2) ...[
+            _buildActionButtons(),
+            const SizedBox(height: 8),
+          ],
+        ],
+      ConstrainedBox(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.of(context).size.height * 0.5,
+        ),
+        child: _buildPreviewPanel(),
+      ),
+      if (_resultPath != null) ...[
+        const SizedBox(height: 8),
+        _buildResultSection(),
+        const SizedBox(height: 8),
+      ],
+      ],
+    );
+  }
+
   Widget _buildModeSelector() {
     return Card(
       child: Padding(padding: const EdgeInsets.all(12), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -287,7 +322,7 @@ class _HomeScreenState extends State<HomeScreen> {
       ]),
       const Divider(height: 1),
       const SizedBox(height: 6),
-      ConstrainedBox(constraints: BoxConstraints(maxHeight: 300), child: ListView.builder(shrinkWrap: true, itemCount: _selectedImages.length, itemBuilder: (context, index) {
+      ConstrainedBox(constraints: BoxConstraints(maxHeight: 300), child: ListView.builder(shrinkWrap: true, primary: false, physics: const NeverScrollableScrollPhysics(), itemCount: _selectedImages.length, itemBuilder: (context, index) {
         final item = _selectedImages[index];
         return Dismissible(key: ValueKey(item.file.path), direction: DismissDirection.endToStart, onDismissed: (_) { setState(() => _selectedImages.removeAt(index)); },
           background: Container(alignment: Alignment.centerRight, margin: const EdgeInsets.symmetric(vertical: 2), padding: const EdgeInsets.only(right: 12), color: Colors.red, child: const Icon(Icons.delete, color: Colors.white)),
@@ -421,7 +456,7 @@ class _HomeScreenState extends State<HomeScreen> {
         borderPercent: _borderPercent,
         rainbowBorder: _isRainbowBorder,
       );
-      await File(savePath).writeAsBytes(fullResBytes);
+      await _writeBytesToPath(fullResBytes, savePath);
       setState(() => _resultPath = savePath);
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('已保存至: $savePath'), duration: const Duration(seconds: 3)));
     } catch (e) {
@@ -450,7 +485,7 @@ class _HomeScreenState extends State<HomeScreen> {
         borderPercent: _borderPercent,
         rainbowBorder: _isRainbowBorder,
       );
-      await File(savePath).writeAsBytes(stitchedBytes);
+      await _writeBytesToPath(stitchedBytes, savePath);
       setState(() => _resultPath = savePath);
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('已保存至: $savePath'), duration: const Duration(seconds: 3)));
     } catch (e) {
@@ -481,6 +516,19 @@ class _HomeScreenState extends State<HomeScreen> {
     );
     if (savedPath == null || savedPath.isEmpty) return null;
     return savedPath;
+  }
+
+  Future<void> _writeBytesToPath(Uint8List bytes, String savePath) async {
+    // Android content:// URI 需要先写临时文件再复制
+    if (savePath.startsWith('content://')) {
+      final tempDir = await getTemporaryDirectory();
+      final tempFile = File('${tempDir.path}/stitch_temp.png');
+      await tempFile.writeAsBytes(bytes);
+      await tempFile.copy(savePath);
+      await tempFile.delete();
+    } else {
+      await File(savePath).writeAsBytes(bytes);
+    }
   }
 
   Future<List<Uint8List>> _getSelectedImageBytes() async => [for (var item in _selectedImages) await item.file.readAsBytes()];
