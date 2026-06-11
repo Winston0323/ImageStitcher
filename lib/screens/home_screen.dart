@@ -17,11 +17,13 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
+enum _ActiveTool { mode, border, image }
+
 class _HomeScreenState extends State<HomeScreen> {
   final List<ImageItem> _selectedImages = [];
   StitchMode _stitchMode = StitchMode.horizontal;
   bool _isProcessing = false;
-  String? _resultPath;
+  _ActiveTool? _activeTool;
 
   // 保存进度
   double _saveProgress = 0.0;
@@ -36,16 +38,10 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final hasImages = _selectedImages.isNotEmpty;
     final isWide = MediaQuery.of(context).size.width >= 600;
 
     final panel = <Widget>[
-      _buildBottomToolbar(),
-      const SizedBox(height: 16),
-      if (_resultPath != null) ...[
-        _buildResultSection(),
-        const SizedBox(height: 12),
-      ],
+      const SizedBox(height: 12),
     ];
 
     Widget body;
@@ -61,11 +57,9 @@ class _HomeScreenState extends State<HomeScreen> {
               Expanded(
                 flex: 1,
                 child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                  const Spacer(),
+                  _buildSubToolbar(),
                   _buildBottomToolbar(),
-                  if (_resultPath != null) ...[
-                    const SizedBox(height: 6),
-                    _buildResultSection(),
-                  ],
                 ]),
               ),
               const SizedBox(width: 8),
@@ -79,7 +73,20 @@ class _HomeScreenState extends State<HomeScreen> {
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Expanded(flex: 1, child: SingleChildScrollView(child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: panel))),
+              Expanded(
+                flex: 1,
+                child: Column(
+                  children: [
+                    Expanded(
+                      child: SingleChildScrollView(
+                        child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: panel),
+                      ),
+                    ),
+                    _buildSubToolbar(),
+                    _buildBottomToolbar(),
+                  ],
+                ),
+              ),
               const SizedBox(width: 12),
               Container(width: 1, color: Colors.grey.shade300),
               const SizedBox(width: 12),
@@ -93,7 +100,7 @@ class _HomeScreenState extends State<HomeScreen> {
       if (Platform.isAndroid) {
         body = _buildAndroidNarrowLayout();
       } else {
-        body = SingleChildScrollView(
+        body = Padding(
           padding: const EdgeInsets.all(8),
           child: _buildNarrowLayout(),
         );
@@ -104,13 +111,18 @@ class _HomeScreenState extends State<HomeScreen> {
       appBar: AppBar(
         title: const Text('图片拼接工具'),
         actions: [
+          if (_previewBytes != null && !_isProcessing)
+            IconButton(
+              icon: const Icon(Icons.save_alt),
+              tooltip: '保存图片',
+              onPressed: _saveFromPreview,
+            ),
           if (_selectedImages.isNotEmpty)
             IconButton(
               icon: const Icon(Icons.delete_sweep),
               tooltip: '清空列表',
               onPressed: () => setState(() {
                 _selectedImages.clear();
-                _resultPath = null;
                 _previewBytes = null;
               }),
             ),
@@ -210,12 +222,6 @@ class _HomeScreenState extends State<HomeScreen> {
               ],
             ),
           ),
-          // 保存按钮（仅预览可用时显示）
-          if (_previewBytes != null && !_isProcessing)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-              child: FilledButton.icon(onPressed: _saveFromPreview, icon: const Icon(Icons.save, size: 18), label: const Text('保存此图片'), style: FilledButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 10))),
-            ),
         ],
       ),
     );
@@ -272,17 +278,6 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ),
           ),
-        // 保存按钮（右下角悬浮）
-        if (_previewBytes != null && !_isProcessing)
-          Positioned(
-            bottom: 8,
-            right: 8,
-            child: FilledButton.icon(
-                onPressed: _saveFromPreview,
-                icon: const Icon(Icons.save, size: 18),
-                label: const Text('保存此图片'),
-                style: FilledButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10))),
-          ),
       ],
     );
   }
@@ -291,23 +286,25 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Widget _buildNarrowLayout() {
     return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        ConstrainedBox(
-          constraints: BoxConstraints(
-            maxHeight: MediaQuery.of(context).size.height * 0.5,
+        Expanded(
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxHeight: MediaQuery.of(context).size.height * 0.5,
+                  ),
+                  child: _buildPreviewPanel(),
+                ),
+              ],
+            ),
           ),
-          child: _buildPreviewPanel(),
         ),
-        const SizedBox(height: 8),
+        _buildSubToolbar(),
         _buildBottomToolbar(),
-        const SizedBox(height: 8),
-      if (_resultPath != null) ...[
-        const SizedBox(height: 8),
-        _buildResultSection(),
-        const SizedBox(height: 8),
-      ],
       ],
     );
   }
@@ -323,19 +320,13 @@ class _HomeScreenState extends State<HomeScreen> {
         ),
         const Divider(height: 1),
         // 底部紧凑控制区
-        Padding(
-          padding: const EdgeInsets.only(bottom: 4),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              _buildBottomToolbar(),
-              if (_resultPath != null) ...[
-                const SizedBox(height: 4),
-                _buildResultSection(),
-              ],
-            ],
-          ),
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _buildSubToolbar(),
+            _buildBottomToolbar(),
+          ],
         ),
       ],
     );
@@ -343,75 +334,51 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // ========== 底部工具栏 ==========
 
-  /// 一排三个按钮：拼接模式、边框、选择图片
+  /// 一排按钮，可横向滑动，固定在底部
   Widget _buildBottomToolbar() {
+    final bottomSafe = MediaQuery.of(context).padding.bottom;
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-      child: Row(
-        children: [
-          Expanded(
-            child: _toolbarButton(
-              icon: Icons.settings_suggest,
-              label: '拼接模式',
-              subtitle: _stitchMode == StitchMode.horizontal ? '水平' : '垂直',
-              onTap: _showModeSheet,
-            ),
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: _toolbarButton(
-              icon: Icons.border_style,
-              label: '边框',
-              subtitle: _borderPercent > 0
-                  ? '${_borderColorIndex == 0 ? "白色" : _borderColorIndex == 1 ? "黑色" : "彩虹"} ${_borderPercent.toInt()}%'
-                  : '无',
-              onTap: _showBorderSheet,
-            ),
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: _toolbarButton(
-              icon: Icons.add_photo_alternate_outlined,
-              label: '选择图片',
-              subtitle: _selectedImages.isEmpty ? '添加' : '${_selectedImages.length}张',
-              onTap: _showImageSheet,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _toolbarButton({
-    required IconData icon,
-    required String label,
-    required String subtitle,
-    required VoidCallback onTap,
-  }) {
-    return Material(
-      color: Theme.of(context).colorScheme.surfaceContainerHighest.withValues(alpha: 0.6),
-      borderRadius: BorderRadius.circular(12),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(12),
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+      padding: EdgeInsets.only(bottom: bottomSafe + 8, left: 12, right: 12, top: 8),
+      child: SizedBox(
+        height: 64,
+        child: SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
           child: Row(
             children: [
-              Icon(icon, size: 20, color: Theme.of(context).colorScheme.primary),
-              const SizedBox(width: 6),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(label, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
-                    const SizedBox(height: 2),
-                    Text(subtitle, style: TextStyle(fontSize: 10, color: Colors.grey[600])),
-                  ],
+              SizedBox(
+                width: 120,
+                child: _toolbarButton(
+                  icon: Icons.settings_suggest,
+                  label: '拼接模式',
+                  subtitle: _stitchMode == StitchMode.horizontal ? '水平' : '垂直',
+                  isActive: _activeTool == _ActiveTool.mode,
+                  onTap: () => _toggleTool(_ActiveTool.mode),
                 ),
               ),
-              Icon(Icons.expand_less, size: 18, color: Colors.grey[500]),
+              const SizedBox(width: 8),
+              SizedBox(
+                width: 130,
+                child: _toolbarButton(
+                  icon: Icons.border_style,
+                  label: '边框',
+                  subtitle: _borderPercent > 0
+                      ? '${_borderColorIndex == 0 ? "白色" : _borderColorIndex == 1 ? "黑色" : "彩虹"} ${_borderPercent.toInt()}%'
+                      : '无',
+                  isActive: _activeTool == _ActiveTool.border,
+                  onTap: () => _toggleTool(_ActiveTool.border),
+                ),
+              ),
+              const SizedBox(width: 8),
+              SizedBox(
+                width: 120,
+                child: _toolbarButton(
+                  icon: Icons.add_photo_alternate_outlined,
+                  label: '选择图片',
+                  subtitle: _selectedImages.isEmpty ? '添加' : '${_selectedImages.length}张',
+                  isActive: _activeTool == _ActiveTool.image,
+                  onTap: () => _toggleTool(_ActiveTool.image),
+                ),
+              ),
             ],
           ),
         ),
@@ -419,7 +386,259 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // ========== 底部弹出面板 ==========
+  void _toggleTool(_ActiveTool tool) {
+    setState(() {
+      _activeTool = _activeTool == tool ? null : tool;
+    });
+  }
+
+  Widget _toolbarButton({
+    required IconData icon,
+    required String label,
+    required String subtitle,
+    required bool isActive,
+    required VoidCallback onTap,
+  }) {
+    final scheme = Theme.of(context).colorScheme;
+    final activeColor = scheme.primaryContainer;
+    final defaultColor = scheme.surfaceContainerHighest.withValues(alpha: 0.6);
+    return Material(
+      color: isActive ? activeColor : defaultColor,
+      borderRadius: BorderRadius.circular(12),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+          child: Row(
+            children: [
+              Icon(icon, size: 20, color: isActive ? scheme.primary : scheme.primary.withValues(alpha: 0.7)),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(label, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: isActive ? scheme.primary : null)),
+                    const SizedBox(height: 2),
+                    Text(subtitle, style: TextStyle(fontSize: 10, color: Colors.grey[600])),
+                  ],
+                ),
+              ),
+              Icon(
+                isActive ? Icons.expand_more : Icons.expand_less,
+                size: 18,
+                color: isActive ? scheme.primary : Colors.grey[500],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ========== 子工具栏（显示在主工具栏上方）==========
+
+  /// 子工具栏容器
+  Widget _buildSubToolbar() {
+    if (_activeTool == null) return const SizedBox.shrink();
+
+    Widget content;
+    switch (_activeTool!) {
+      case _ActiveTool.mode:
+        content = _buildModeSubToolbar();
+        break;
+      case _ActiveTool.border:
+        content = _buildBorderSubToolbar();
+        break;
+      case _ActiveTool.image:
+        content = _buildImageSubToolbar();
+        break;
+    }
+
+    final isBorder = _activeTool == _ActiveTool.border;
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      child: isBorder
+          ? content
+          : SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: content,
+            ),
+    );
+  }
+
+  // --- 拼接模式子工具栏 ---
+  Widget _buildModeSubToolbar() {
+    return Row(
+      children: [
+        _subChip(
+          icon: Icons.view_column,
+          label: '水平',
+          hint: '横向排列',
+          selected: _stitchMode == StitchMode.horizontal,
+          onTap: () {
+            setState(() => _stitchMode = StitchMode.horizontal);
+            _autoPreview();
+          },
+        ),
+        const SizedBox(width: 8),
+        _subChip(
+          icon: Icons.view_stream,
+          label: '垂直',
+          hint: '纵向排列',
+          selected: _stitchMode == StitchMode.vertical,
+          onTap: () {
+            setState(() => _stitchMode = StitchMode.vertical);
+            _autoPreview();
+          },
+        ),
+      ],
+    );
+  }
+
+  // --- 边框子工具栏 ---
+  Widget _buildBorderSubToolbar() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // 第一栏：颜色选择
+        Row(
+          children: [
+            _subChip(
+              color: Colors.white,
+              label: '白色',
+              selected: _borderColorIndex == 0,
+              onTap: () {
+                setState(() => _borderColorIndex = 0);
+                _autoPreview();
+              },
+            ),
+            const SizedBox(width: 8),
+            _subChip(
+              color: Colors.black,
+              label: '黑色',
+              selected: _borderColorIndex == 1,
+              onTap: () {
+                setState(() => _borderColorIndex = 1);
+                _autoPreview();
+              },
+            ),
+            const SizedBox(width: 8),
+            _subChip(
+              icon: Icons.gradient,
+              label: '彩虹',
+              selected: _borderColorIndex == 2,
+              onTap: () {
+                setState(() => _borderColorIndex = 2);
+                _autoPreview();
+              },
+            ),
+          ],
+        ),
+        const SizedBox(height: 4),
+        // 第二栏：粗细调节
+        Row(
+          children: [
+            Text('粗细', style: TextStyle(fontSize: 12, color: Colors.grey[700])),
+            Expanded(
+              child: Slider(
+                value: _borderPercent,
+                min: 0, max: 10, divisions: 10,
+                label: '${_borderPercent.toInt()}%',
+                onChanged: (v) => setState(() => _borderPercent = v),
+                onChangeEnd: (_) => _autoPreview(),
+              ),
+            ),
+            SizedBox(width: 30, child: Text('${_borderPercent.toInt()}%', style: const TextStyle(fontSize: 11))),
+          ],
+        ),
+      ],
+    );
+  }
+
+  // --- 选择图片子工具栏 ---
+  Widget _buildImageSubToolbar() {
+    return Row(
+      children: [
+        _subChip(
+          icon: Icons.add_photo_alternate_outlined,
+          label: '添加',
+          selected: false,
+          onTap: _pickImages,
+        ),
+        if (_selectedImages.isNotEmpty) ...[
+          const SizedBox(width: 8),
+          _subChip(
+            icon: Icons.swap_vert,
+            label: '排序',
+            selected: false,
+            onTap: _reorderImages,
+          ),
+          const SizedBox(width: 8),
+          _subChip(
+            icon: Icons.delete_sweep,
+            label: '清空',
+            selected: false,
+            onTap: () => setState(() {
+              _selectedImages.clear();
+              _previewBytes = null;
+            }),
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _subChip({
+    IconData? icon,
+    Color? color,
+    required String label,
+    String? hint,
+    required bool selected,
+    required VoidCallback onTap,
+  }) {
+    final scheme = Theme.of(context).colorScheme;
+    return Material(
+      color: selected ? scheme.primaryContainer : scheme.surfaceContainerHighest.withValues(alpha: 0.5),
+      borderRadius: BorderRadius.circular(10),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(10),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (icon != null) ...[
+                Icon(icon, size: 18, color: selected ? scheme.primary : scheme.onSurface.withValues(alpha: 0.7)),
+                const SizedBox(width: 6),
+              ] else if (color != null) ...[
+                Container(
+                  width: 18, height: 18,
+                  decoration: BoxDecoration(
+                    color: color,
+                    shape: BoxShape.circle,
+                    border: color == Colors.white ? Border.all(color: Colors.grey[400]!) : null,
+                  ),
+                ),
+                const SizedBox(width: 6),
+              ],
+              Text(label, style: TextStyle(fontSize: 13, fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+                  color: selected ? scheme.primary : scheme.onSurface.withValues(alpha: 0.8))),
+              if (hint != null) ...[
+                const SizedBox(width: 4),
+                Text(hint, style: TextStyle(fontSize: 10, color: Colors.grey[500])),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ========== 已废弃的弹窗方法（保留以备后用）==========
 
   void _showModeSheet() {
     showModalBottomSheet(
@@ -674,176 +893,10 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _buildModeSelector() {
-    final content = Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        const Row(children: [Icon(Icons.settings_suggest, size: 18, color: Colors.blue), SizedBox(width: 8), Text('拼接模式', style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold))]),
-        const SizedBox(height: 8),
-        SegmentedButton<StitchMode>(segments: const [
-          ButtonSegment(value: StitchMode.horizontal, label: Text('水平'), icon: Icon(Icons.view_column, size: 18)),
-          ButtonSegment(value: StitchMode.vertical, label: Text('垂直'), icon: Icon(Icons.view_stream, size: 18)),
-        ], selected: {_stitchMode}, onSelectionChanged: (selection) { setState(() => _stitchMode = selection.first); _autoPreview(); }),
-        _modeHint(_stitchMode == StitchMode.horizontal ? '按宽度对齐，横向排列（统一高度）' : '按长度对齐，纵向排列（统一宽度）'),
-      ]),
-    );
-    if (Platform.isAndroid) return content;
-    return Card(child: content);
-  }
-
   Widget _modeHint(String text) => Padding(
     padding: const EdgeInsets.only(top: 6),
     child: Container(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6), decoration: BoxDecoration(color: Colors.blue.withValues(alpha: 0.08), borderRadius: BorderRadius.circular(6)), child: Text(text, style: TextStyle(fontSize: 12, color: Colors.grey[700]))),
   );
-
-  Widget _buildBorderSelector() {
-    final colors = [Colors.white, Colors.black, null];
-    final colorLabels = ['白色', '黑色', '彩虹'];
-    final colorIcons = [null, null, Icons.gradient];
-
-    final content = Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        const Row(children: [Icon(Icons.border_style, size: 18, color: Colors.blue), SizedBox(width: 8), Text('图片边框', style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold))]),
-        const SizedBox(height: 6),
-        Row(children: [
-          Text('颜色：', style: TextStyle(fontSize: 12, color: Colors.grey[700])),
-          const SizedBox(width: 8),
-          ...List.generate(3, (i) => Padding(
-            padding: const EdgeInsets.only(right: 6),
-            child: ChoiceChip(
-              label: Row(mainAxisSize: MainAxisSize.min, children: [
-                if (colorIcons[i] != null) Icon(colorIcons[i], size: 14),
-                if (colors[i] != null) CircleAvatar(radius: 6, backgroundColor: colors[i]),
-                const SizedBox(width: 4),
-                Text(colorLabels[i], style: const TextStyle(fontSize: 12)),
-              ]),
-              selected: _borderColorIndex == i,
-              onSelected: (_) => setState(() { _borderColorIndex = i; _autoPreview(); }),
-            ),
-          )),
-        ]),
-        const SizedBox(height: 8),
-        Row(children: [
-          Text('粗细：', style: TextStyle(fontSize: 12, color: Colors.grey[700])),
-          Expanded(child: Slider(
-            value: _borderPercent,
-            min: 0, max: 10, divisions: 10,
-            label: '${_borderPercent.toInt()}%',
-            onChanged: (v) => setState(() => _borderPercent = v),
-            onChangeEnd: (_) => _autoPreview(),
-          )),
-          SizedBox(width: 32, child: Text('${_borderPercent.toInt()}%', style: const TextStyle(fontSize: 12))),
-        ]),
-      ]),
-    );
-    if (Platform.isAndroid) return content;
-    return Card(child: content);
-  }
-
-  Widget _buildAddButton() {
-    if (Platform.isAndroid) {
-      return Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12),
-        child: SizedBox(
-          width: double.infinity,
-          height: 44,
-          child: OutlinedButton.icon(
-            onPressed: _pickImages,
-            icon: const Icon(Icons.add_photo_alternate_outlined, size: 20),
-            label: const Text('添加图片', style: TextStyle(fontSize: 13)),
-          ),
-        ),
-      );
-    }
-    return SizedBox(width: double.infinity, height: 80, child: Card(
-    color: Theme.of(context).colorScheme.primaryContainer.withValues(alpha: 0.25),
-    shape: RoundedRectangleBorder(side: BorderSide(color: Theme.of(context).colorScheme.primary.withValues(alpha: 0.4), width: 2), borderRadius: BorderRadius.circular(10)),
-    child: InkWell(borderRadius: BorderRadius.circular(10), onTap: _pickImages, child: Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
-      Icon(Icons.add_photo_alternate_outlined, size: 32, color: Theme.of(context).colorScheme.primary),
-      const SizedBox(height: 6),
-      Text('点击添加图片', style: TextStyle(fontSize: 13, color: Theme.of(context).colorScheme.primary, fontWeight: FontWeight.w500)),
-    ]))),
-  ));
-  }
-
-  Widget _buildImageList() {
-    if (_selectedImages.isEmpty) {
-      final placeholder = Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-        child: Text('还没有选择任何图片', style: TextStyle(fontSize: 13, color: Colors.grey[500])),
-      );
-      if (Platform.isAndroid) return placeholder;
-      return Card(child: Padding(padding: const EdgeInsets.all(24), child: Column(children: [
-        Icon(Icons.image_not_supported_outlined, size: 48, color: Colors.grey[400]),
-        const SizedBox(height: 12),
-        Text('还没有选择任何图片', style: TextStyle(fontSize: 15, color: Colors.grey[600])),
-        const SizedBox(height: 6),
-        Text('点击上方按钮开始选择', style: TextStyle(fontSize: 13, color: Colors.grey[500])),
-      ])));
-    }
-
-    if (Platform.isAndroid) {
-      // Android：紧凑的水平缩略图行
-      return Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-        child: Row(
-          children: [
-            Row(children: [
-              const Icon(Icons.photo_library, size: 16, color: Colors.blue),
-              const SizedBox(width: 4),
-              Text('已选 ${_selectedImages.length} 张', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
-            ]),
-            const Spacer(),
-            TextButton.icon(
-              onPressed: _reorderImages,
-              icon: const Icon(Icons.swap_vert, size: 14),
-              label: const Text('排序', style: TextStyle(fontSize: 12)),
-              style: TextButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 8), minimumSize: Size.zero, tapTargetSize: MaterialTapTargetSize.shrinkWrap),
-            ),
-          ],
-        ),
-      );
-    }
-
-    return Card(child: Padding(padding: const EdgeInsets.all(10), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-        Row(children: [const Icon(Icons.photo_library, size: 18, color: Colors.blue), const SizedBox(width: 6), Text('已选 ${_selectedImages.length} 张', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14))]),
-        TextButton.icon(onPressed: _reorderImages, icon: const Icon(Icons.swap_vert, size: 16), label: const Text('排序', style: TextStyle(fontSize: 12))),
-      ]),
-      const Divider(height: 1),
-      const SizedBox(height: 6),
-      ConstrainedBox(constraints: BoxConstraints(maxHeight: 300), child: ListView.builder(shrinkWrap: true, primary: false, physics: const NeverScrollableScrollPhysics(), itemCount: _selectedImages.length, itemBuilder: (context, index) {
-        final item = _selectedImages[index];
-        return Dismissible(key: ValueKey(item.file.path), direction: DismissDirection.endToStart, onDismissed: (_) { setState(() => _selectedImages.removeAt(index)); _autoPreview(); },
-          background: Container(alignment: Alignment.centerRight, margin: const EdgeInsets.symmetric(vertical: 2), padding: const EdgeInsets.only(right: 12), color: Colors.red, child: const Icon(Icons.delete, color: Colors.white)),
-          child: ListTile(contentPadding: const EdgeInsets.symmetric(horizontal: 6), dense: true, leading: ClipRRect(borderRadius: BorderRadius.circular(4), child: Image.file(item.file, width: 44, height: 44, fit: BoxFit.cover, errorBuilder: (_, __, ___) => _placeholderIcon())),
-            title: Text(item.name, overflow: TextOverflow.ellipsis, maxLines: 1, style: const TextStyle(fontSize: 13)), subtitle: Text('#${index + 1}', style: const TextStyle(fontSize: 11, color: Colors.blue, fontWeight: FontWeight.w600)),
-            trailing: IconButton(iconSize: 18, icon: const Icon(Icons.remove_circle_outline, color: Colors.redAccent), onPressed: () => setState(() { _selectedImages.removeAt(index); _autoPreview(); })),
-        ));
-      })),
-    ])));
-  }
-
-  Widget _buildResultSection() {
-    final content = Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      child: Row(children: [
-        const Icon(Icons.check_circle_outline, color: Colors.green, size: 18),
-        const SizedBox(width: 6),
-        Expanded(child: Text('保存成功!', style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.green, fontSize: 13))),
-      ]),
-    );
-    if (Platform.isAndroid) return content;
-    return Card(
-    color: Colors.green.withValues(alpha: 0.06),
-    shape: RoundedRectangleBorder(side: BorderSide(color: Colors.green.withValues(alpha: 0.4)), borderRadius: BorderRadius.circular(10)),
-    child: Padding(padding: const EdgeInsets.all(12), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      const Row(children: [Icon(Icons.check_circle_outline, color: Colors.green, size: 20), SizedBox(width: 6), Text('保存成功!', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.green, fontSize: 14))]),
-      const SizedBox(height: 4),
-      SelectableText(_resultPath!, style: const TextStyle(fontSize: 11, fontFamily: 'monospace')),
-    ])));
-  }
 
   Widget _placeholderIcon() => Container(width: 44, height: 44, color: Colors.grey[200], child: const Icon(Icons.image, color: Colors.grey, size: 22));
 
@@ -972,8 +1025,7 @@ class _HomeScreenState extends State<HomeScreen> {
         final savePath = await _pickSavePath(bytes: fullResBytes);
         if (savePath == null) return;
         await _writeBytesToPath(fullResBytes, savePath);
-        setState(() => _resultPath = savePath);
-        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('已保存至: $savePath'), duration: const Duration(seconds: 3)));
+        if (mounted) _showSaveSuccessDialog('已保存');
       }
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('保存失败: $e'), duration: const Duration(seconds: 5)));
@@ -986,12 +1038,31 @@ class _HomeScreenState extends State<HomeScreen> {
   /// 保存图片到系统相册的 Stitcher 相簿中（Android/iOS）
   Future<void> _saveToDeviceAlbum(Uint8List bytes) async {
     await Gal.putImageBytes(bytes, album: 'Stitcher');
-    setState(() => _resultPath = '相册 › Stitcher');
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('已保存到 Stitcher 相册'), duration: Duration(seconds: 2)),
-      );
-    }
+    if (mounted) _showSaveSuccessDialog('已保存到 Stitcher 相册');
+  }
+
+  void _showSaveSuccessDialog(String message) {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.check_circle, color: Colors.green, size: 48),
+            const SizedBox(height: 16),
+            Text(message, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 4),
+            const Text('保存成功', style: TextStyle(fontSize: 14, color: Colors.grey)),
+          ],
+        ),
+      ),
+    );
+    // 1.5 秒后自动关闭
+    Future.delayed(const Duration(milliseconds: 500), () {
+      if (Navigator.of(context).canPop()) Navigator.of(context).pop();
+    });
   }
 
   void _reorderImages() {
