@@ -203,6 +203,13 @@ class _HomeScreenState extends State<HomeScreen> {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        ConstrainedBox(
+          constraints: BoxConstraints(
+            maxHeight: MediaQuery.of(context).size.height * 0.5,
+          ),
+          child: _buildPreviewPanel(),
+        ),
+        const SizedBox(height: 8),
         _buildModeSelector(),
         const SizedBox(height: 8),
         _buildBorderSelector(),
@@ -213,12 +220,6 @@ class _HomeScreenState extends State<HomeScreen> {
           _buildImageList(),
           const SizedBox(height: 8),
         ],
-      ConstrainedBox(
-        constraints: BoxConstraints(
-          maxHeight: MediaQuery.of(context).size.height * 0.5,
-        ),
-        child: _buildPreviewPanel(),
-      ),
       if (_resultPath != null) ...[
         const SizedBox(height: 8),
         _buildResultSection(),
