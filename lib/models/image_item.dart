@@ -5,11 +5,15 @@ class ImageItem {
   final File file;
   final String name;
   Uint8List? thumbnailBytes;
+  double? thumbWidth;
+  double? thumbHeight;
 
   ImageItem({
     required this.file,
     required this.name,
     this.thumbnailBytes,
+    this.thumbWidth,
+    this.thumbHeight,
   });
 }
 

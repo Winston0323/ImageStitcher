@@ -14,14 +14,24 @@ class ImageStitchingApp extends StatelessWidget {
       title: '图片拼接工具',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
+        brightness: Brightness.dark,
+        scaffoldBackgroundColor: const Color(0xFF1E1E1E),
+        colorScheme: ColorScheme.dark(
+          surface: const Color(0xFF2A2A2A),
+          primary: Colors.blue[300]!,
+          onPrimary: Colors.black,
+          secondary: Colors.blue[200]!,
+          onSurface: Colors.white,
+        ),
         useMaterial3: true,
         appBarTheme: const AppBarTheme(
           centerTitle: true,
           elevation: 2,
+          backgroundColor: Color(0xFF252525),
         ),
         cardTheme: CardThemeData(
           elevation: 4,
+          color: const Color(0xFF2A2A2A),
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(12),
           ),

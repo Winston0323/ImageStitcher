@@ -162,7 +162,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       child: CircularProgressIndicator(strokeWidth: 2, color: Colors.blue),
                     ),
                   ),
-                IconButton(visualDensity: VisualDensity.compact, icon: const Icon(Icons.refresh, size: 20), tooltip: '刷新预览', onPressed: (_selectedImages.length >= 2 && !_isProcessing) ? _autoPreview : null),
+                IconButton(visualDensity: VisualDensity.compact, icon: const Icon(Icons.refresh, size: 20), tooltip: '刷新预览', onPressed: (_selectedImages.isNotEmpty && !_isProcessing) ? _autoPreview : null),
               ],
             ),
           ),
@@ -193,7 +193,7 @@ class _HomeScreenState extends State<HomeScreen> {
                             child: Column(mainAxisSize: MainAxisSize.min, children: [
                               Icon(Icons.image_outlined, size: 64, color: Colors.grey[350]),
                               const SizedBox(height: 12),
-                              Text('选择 2 张以上图片后\n将在此显示预览',
+                              Text('选择图片后\n将在此显示预览',
                                   textAlign: TextAlign.center, style: TextStyle(fontSize: 14, color: Colors.grey[500], height: 1.5)),
                             ]),
                           ),
@@ -248,7 +248,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 child: Column(mainAxisSize: MainAxisSize.min, children: [
                   Icon(Icons.image_outlined, size: 64, color: Colors.grey[350]),
                   const SizedBox(height: 12),
-                  Text('选择 2 张以上图片后\n将在此显示预览',
+                  Text('选择图片后\n将在此显示预览',
                       textAlign: TextAlign.center,
                       style: TextStyle(fontSize: 14, color: Colors.grey[500], height: 1.5)),
                 ]),
@@ -348,10 +348,22 @@ class _HomeScreenState extends State<HomeScreen> {
               SizedBox(
                 width: 120,
                 child: _toolbarButton(
+                  icon: Icons.add_photo_alternate_outlined,
+                  label: '选择图片',
+                  subtitle: _selectedImages.isEmpty ? '添加' : '${_selectedImages.length}张',
+                  isActive: _activeTool == _ActiveTool.image,
+                  onTap: () => _toggleTool(_ActiveTool.image),
+                ),
+              ),
+              const SizedBox(width: 8),
+              SizedBox(
+                width: 120,
+                child: _toolbarButton(
                   icon: Icons.settings_suggest,
                   label: '拼接模式',
                   subtitle: _stitchMode == StitchMode.horizontal ? '水平' : '垂直',
                   isActive: _activeTool == _ActiveTool.mode,
+                  enabled: _selectedImages.length > 1,
                   onTap: () => _toggleTool(_ActiveTool.mode),
                 ),
               ),
@@ -368,17 +380,6 @@ class _HomeScreenState extends State<HomeScreen> {
                   onTap: () => _toggleTool(_ActiveTool.border),
                 ),
               ),
-              const SizedBox(width: 8),
-              SizedBox(
-                width: 120,
-                child: _toolbarButton(
-                  icon: Icons.add_photo_alternate_outlined,
-                  label: '选择图片',
-                  subtitle: _selectedImages.isEmpty ? '添加' : '${_selectedImages.length}张',
-                  isActive: _activeTool == _ActiveTool.image,
-                  onTap: () => _toggleTool(_ActiveTool.image),
-                ),
-              ),
             ],
           ),
         ),
@@ -387,6 +388,8 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _toggleTool(_ActiveTool tool) {
+    // 只有一张图时不允许切换拼接模式
+    if (tool == _ActiveTool.mode && _selectedImages.length <= 1) return;
     setState(() {
       _activeTool = _activeTool == tool ? null : tool;
     });
@@ -398,37 +401,40 @@ class _HomeScreenState extends State<HomeScreen> {
     required String subtitle,
     required bool isActive,
     required VoidCallback onTap,
+    bool enabled = true,
   }) {
     final scheme = Theme.of(context).colorScheme;
-    final activeColor = scheme.primaryContainer;
+    final activeColor = scheme.primary.withValues(alpha: 0.2);
     final defaultColor = scheme.surfaceContainerHighest.withValues(alpha: 0.6);
+    final disabledColor = scheme.surfaceContainerHighest.withValues(alpha: 0.25);
+    final isDisabled = !enabled;
     return Material(
-      color: isActive ? activeColor : defaultColor,
+      color: isDisabled ? disabledColor : (isActive ? activeColor : defaultColor),
       borderRadius: BorderRadius.circular(12),
       child: InkWell(
         borderRadius: BorderRadius.circular(12),
-        onTap: onTap,
+        onTap: isDisabled ? null : onTap,
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
           child: Row(
             children: [
-              Icon(icon, size: 20, color: isActive ? scheme.primary : scheme.primary.withValues(alpha: 0.7)),
+              Icon(icon, size: 20, color: isDisabled ? Colors.grey[400] : (isActive ? scheme.primary : scheme.primary.withValues(alpha: 0.7))),
               const SizedBox(width: 6),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Text(label, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: isActive ? scheme.primary : null)),
+                    Text(label, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: isDisabled ? Colors.grey[400] : (isActive ? scheme.primary : null))),
                     const SizedBox(height: 2),
-                    Text(subtitle, style: TextStyle(fontSize: 10, color: Colors.grey[600])),
+                    Text(subtitle, style: TextStyle(fontSize: 10, color: isDisabled ? Colors.grey[400] : Colors.grey[600])),
                   ],
                 ),
               ),
               Icon(
                 isActive ? Icons.expand_more : Icons.expand_less,
                 size: 18,
-                color: isActive ? scheme.primary : Colors.grey[500],
+                color: isDisabled ? Colors.grey[400] : (isActive ? scheme.primary : Colors.grey[500]),
               ),
             ],
           ),
@@ -456,16 +462,16 @@ class _HomeScreenState extends State<HomeScreen> {
         break;
     }
 
-    final isBorder = _activeTool == _ActiveTool.border;
+    final needsScroll = _activeTool == _ActiveTool.mode;
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      child: isBorder
-          ? content
-          : SingleChildScrollView(
+      child: needsScroll
+          ? SingleChildScrollView(
               scrollDirection: Axis.horizontal,
               child: content,
-            ),
+            )
+          : content,
     );
   }
 
@@ -560,34 +566,207 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // --- 选择图片子工具栏 ---
   Widget _buildImageSubToolbar() {
-    return Row(
-      children: [
-        _subChip(
-          icon: Icons.add_photo_alternate_outlined,
-          label: '添加',
-          selected: false,
-          onTap: _pickImages,
-        ),
-        if (_selectedImages.isNotEmpty) ...[
-          const SizedBox(width: 8),
-          _subChip(
-            icon: Icons.swap_vert,
-            label: '排序',
-            selected: false,
-            onTap: _reorderImages,
-          ),
-          const SizedBox(width: 8),
-          _subChip(
-            icon: Icons.delete_sweep,
-            label: '清空',
-            selected: false,
-            onTap: () => setState(() {
-              _selectedImages.clear();
-              _previewBytes = null;
-            }),
+    final thumbHeight = 64.0;
+    final thumbnailCount = _selectedImages.length;
+
+    // empty state
+    if (thumbnailCount == 0) {
+      return Row(
+        children: [
+          _addImageBox(thumbHeight),
+          const SizedBox(width: 16),
+          _trashIcon(thumbHeight),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text('点击 + 号添加图片',
+                style: TextStyle(fontSize: 12, color: Colors.grey[500])),
           ),
         ],
-      ],
+      );
+    }
+
+    // 计算所有缩略图总宽度
+    double totalThumbWidth = 0;
+    for (var item in _selectedImages) {
+      double w = thumbHeight;
+      if (item.thumbWidth != null && item.thumbHeight != null && item.thumbHeight! > 0) {
+        w = thumbHeight * item.thumbWidth! / item.thumbHeight!;
+      }
+      totalThumbWidth += w + 8; // 8 = right padding
+    }
+
+    // 整体可左右滚动，加号在左、垃圾桶在右、缩略图在中间可长按拖拽
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Row(
+        children: [
+          _addImageBox(thumbHeight),
+          const SizedBox(width: 8),
+          SizedBox(
+            width: totalThumbWidth,
+            height: thumbHeight,
+            child: ReorderableListView.builder(
+                scrollDirection: Axis.horizontal,
+                itemCount: thumbnailCount,
+                onReorder: (oldIndex, newIndex) {
+                  setState(() {
+                    if (newIndex > oldIndex) newIndex--;
+                    final item = _selectedImages.removeAt(oldIndex);
+                    _selectedImages.insert(newIndex, item);
+                  });
+                  _autoPreview();
+                },
+              proxyDecorator: (child, index, animation) {
+                return AnimatedBuilder(
+                  animation: animation,
+                  builder: (context, child) {
+                    final scale = 1.0 + animation.value * 0.1;
+                    return Transform.scale(
+                      scale: scale,
+                      child: Material(
+                        elevation: 4,
+                        borderRadius: BorderRadius.circular(8),
+                        child: child,
+                      ),
+                    );
+                  },
+                  child: child,
+                );
+              },
+              buildDefaultDragHandles: false,
+              itemBuilder: (_, index) {
+                final item = _selectedImages[index];
+                return ReorderableDelayedDragStartListener(
+                  key: ValueKey(item.file.path),
+                  index: index,
+                  child: _imageThumbItem(index, thumbHeight),
+                );
+              },
+            ),
+          ),
+          const SizedBox(width: 8),
+          _trashIcon(thumbHeight),
+        ],
+      ),
+    );
+  }
+
+  Widget _imageThumbItem(int index, double thumbHeight) {
+    final item = _selectedImages[index];
+    double thumbWidth = thumbHeight;
+    if (item.thumbWidth != null && item.thumbHeight != null && item.thumbHeight! > 0) {
+      thumbWidth = thumbHeight * item.thumbWidth! / item.thumbHeight!;
+    }
+    return Padding(
+      padding: const EdgeInsets.only(right: 8),
+      child: Material(
+        borderRadius: BorderRadius.circular(8),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: () => setState(() {
+            _selectedImages.removeAt(index);
+            _autoPreview();
+          }),
+          child: Stack(
+            children: [
+              Container(
+                width: thumbWidth,
+                height: thumbHeight,
+                decoration: BoxDecoration(
+                  color: Colors.grey[800],
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: item.thumbnailBytes != null
+                      ? Image.memory(item.thumbnailBytes!, fit: BoxFit.cover)
+                      : Image.file(item.file, fit: BoxFit.cover,
+                          errorBuilder: (_, __, ___) => _placeholderIcon()),
+                ),
+              ),
+              // 序号角标
+              Positioned(
+                top: 2, left: 2,
+                child: Container(
+                  width: 18, height: 18,
+                  decoration: BoxDecoration(
+                    color: Theme.of(context).colorScheme.primary,
+                    borderRadius: BorderRadius.circular(9),
+                  ),
+                  alignment: Alignment.center,
+                  child: Text('${index + 1}',
+                      style: const TextStyle(fontSize: 10, color: Colors.white, fontWeight: FontWeight.bold)),
+                ),
+              ),
+              // 删除遮罩
+              Positioned.fill(
+                child: Material(
+                  color: Colors.transparent,
+                  child: InkWell(
+                    onTap: () => setState(() {
+                      _selectedImages.removeAt(index);
+                      _autoPreview();
+                    }),
+                    child: const Align(
+                      alignment: Alignment.topRight,
+                      child: Padding(
+                        padding: EdgeInsets.all(2),
+                        child: Icon(Icons.cancel, size: 16, color: Colors.white, shadows: [Shadow(blurRadius: 3, color: Colors.black45)]),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _addImageBox(double size) {
+    return GestureDetector(
+      onTap: _pickImages,
+      child: Container(
+          width: size,
+          height: size,
+          decoration: BoxDecoration(
+            border: Border.all(color: Colors.grey[400]!, width: 1.5, strokeAlign: BorderSide.strokeAlignInside),
+            borderRadius: BorderRadius.circular(8),
+            color: Colors.grey[100]?.withValues(alpha: 0.4),
+          ),
+          alignment: Alignment.center,
+          child: Icon(Icons.add, size: 28, color: Colors.grey[500]),
+        ),
+    );
+  }
+
+  Widget _trashIcon(double size) {
+    final isEmpty = _selectedImages.isEmpty;
+    final color = isEmpty ? Colors.grey[400]! : Colors.red[400]!;
+    return GestureDetector(
+      onTap: isEmpty ? null : () => setState(() {
+        _selectedImages.clear();
+        _previewBytes = null;
+      }),
+      child: Container(
+        width: size,
+        height: size,
+        decoration: BoxDecoration(
+          border: Border.all(color: isEmpty ? Colors.grey[300]! : Colors.red[300]!, width: 1.5, strokeAlign: BorderSide.strokeAlignInside),
+          borderRadius: BorderRadius.circular(8),
+          color: (isEmpty ? Colors.grey : Colors.red).withValues(alpha: 0.06),
+        ),
+        alignment: Alignment.center,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.delete_outline, size: 20, color: color),
+            const SizedBox(height: 2),
+            Text('全部清空', style: TextStyle(fontSize: 9, color: color)),
+          ],
+        ),
+      ),
     );
   }
 
@@ -601,7 +780,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }) {
     final scheme = Theme.of(context).colorScheme;
     return Material(
-      color: selected ? scheme.primaryContainer : scheme.surfaceContainerHighest.withValues(alpha: 0.5),
+      color: selected ? scheme.primary.withValues(alpha: 0.2) : scheme.surfaceContainerHighest.withValues(alpha: 0.5),
       borderRadius: BorderRadius.circular(10),
       child: InkWell(
         borderRadius: BorderRadius.circular(10),
@@ -917,7 +1096,7 @@ class _HomeScreenState extends State<HomeScreen> {
         if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('已添加 ${images.length} 张图片'), duration: const Duration(seconds: 1)));
         // 等所有缩略图生成完再自动预览
         await Future.wait(tasks);
-        if (_selectedImages.length >= 2) _autoPreview();
+        if (_selectedImages.isNotEmpty) _autoPreview();
       } else {
         // 其他平台：使用 file_picker
         final result = await FilePicker.platform.pickFiles(type: FileType.custom, allowedExtensions: ['jpg', 'jpeg', 'png', 'bmp', 'webp', 'gif'], allowMultiple: true);
@@ -932,7 +1111,7 @@ class _HomeScreenState extends State<HomeScreen> {
         if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('已添加 ${result.files.length} 张图片'), duration: const Duration(seconds: 1)));
         // 等所有缩略图生成完再自动预览
         await Future.wait(tasks);
-        if (_selectedImages.length >= 2) _autoPreview();
+        if (_selectedImages.isNotEmpty) _autoPreview();
       }
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('选择失败: $e')));
@@ -943,8 +1122,16 @@ class _HomeScreenState extends State<HomeScreen> {
     try {
       final bytes = await item.file.readAsBytes();
       final thumb = await ImageStitcherService.createThumbnail(bytes, percent: 10);
+      // 解码缩略图获取尺寸
+      final dims = await ImageStitcherService.getImageDimensions(thumb);
       if (mounted) {
-        setState(() => item.thumbnailBytes = thumb);
+        setState(() {
+          item.thumbnailBytes = thumb;
+          if (dims != null) {
+            item.thumbWidth = dims.width.toDouble();
+            item.thumbHeight = dims.height.toDouble();
+          }
+        });
       }
     } catch (_) {
       // 缩略图生成失败不影响主流程
@@ -959,7 +1146,10 @@ class _HomeScreenState extends State<HomeScreen> {
   bool get _isRainbowBorder => _borderColorIndex == 2;
 
   Future<void> _autoPreview() async {
-    if (_selectedImages.length < 2) return; // 保留旧预览，不清空
+    if (_selectedImages.isEmpty) {
+      setState(() => _previewBytes = null);
+      return;
+    }
     setState(() { _isProcessing = true; });
     try {
       final imageBytes = await _getThumbnailBytes();
@@ -1005,7 +1195,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _saveFromPreview() async {
-    if (_selectedImages.length < 2) return;
+    if (_selectedImages.isEmpty) return;
     _startSaveTimer();
     setState(() { _isProcessing = true; _saveProgress = 0.0; });
     try {

@@ -26,7 +26,10 @@ class ImageStitcherService {
     bool rainbowBorder = false,
   }) async {
     if (images.isEmpty) throw Exception('没有可拼接的图片');
-    if (images.length == 1) return images.first;
+    if (images.length == 1 && !addBorder) return images.first;
+    if (images.length == 1 && addBorder) {
+      return await _addBorderToImage(images.first, borderPercent, borderColor, rainbowBorder, maxPreviewDim);
+    }
 
     final sw = Stopwatch()..start();
     void log(String msg) {
@@ -150,10 +153,10 @@ class ImageStitcherService {
           ];
           final nColors = rainbowColors.length;
           final denom = (canvasWidth + canvasHeight).toDouble();
-          // 网格化：水平 256 列 × 竖向 (按边框宽度自适应行数，最多 256)
-          final stepsX = 256;
+          // 网格化：按边框矩形实际尺寸分配步数，保证横向和竖向右大致相同的像素密度
+          final stepsX = math.max(1, math.min(256, borderRect.width.round()));
           final cellW = borderRect.width / stepsX;
-          final stepsY = math.min(bw, 256).clamp(1, 256);
+          final stepsY = math.max(1, math.min(256, borderRect.height.round()));
           if (stepsY < 1) {
             // 边框太窄，画一条即可
             final cx = borderRect.center.dx;
@@ -263,6 +266,126 @@ class ImageStitcherService {
     return outputBytes;
   }
 
+  /// 为单张图片添加边框
+  static Future<Uint8List> _addBorderToImage(
+    Uint8List imageBytes,
+    double borderPercent,
+    ui.Color borderColor,
+    bool rainbowBorder,
+    int maxPreviewDim,
+  ) async {
+    final srcImage = await _decodeImageFromBytes(imageBytes);
+    if (srcImage == null) throw Exception('无法解码图片');
+
+    final bw = ((srcImage.width > srcImage.height ? srcImage.width : srcImage.height) * borderPercent / 100).round().clamp(1, 9999);
+    final canvasW = srcImage.width + 2 * bw;
+    final canvasH = srcImage.height + 2 * bw;
+
+    final recorder = ui.PictureRecorder();
+    final canvas = ui.Canvas(recorder);
+
+    // 白色背景
+    canvas.drawRect(
+      ui.Rect.fromLTWH(0, 0, canvasW.toDouble(), canvasH.toDouble()),
+      ui.Paint()..color = const ui.Color(0xFFFFFFFF),
+    );
+
+    // 边框
+    if (borderPercent > 0) {
+      final borderRect = ui.Rect.fromLTWH(0, 0, canvasW.toDouble(), canvasH.toDouble());
+      if (rainbowBorder) {
+        final rainbowColors = [
+          const ui.Color(0xFFFF0000), const ui.Color(0xFFFF7F00),
+          const ui.Color(0xFFFFFF00), const ui.Color(0xFF00FF00),
+          const ui.Color(0xFF0000FF), const ui.Color(0xFF4B0082),
+          const ui.Color(0xFF8B00FF),
+        ];
+        final nColors = rainbowColors.length;
+        final denom = (canvasW + canvasH).toDouble();
+        final stepsX = math.max(1, math.min(256, borderRect.width.round()));
+        final cellW = borderRect.width / stepsX;
+        final stepsY = math.max(1, math.min(256, borderRect.height.round()));
+        if (stepsY < 1) {
+          final cx = borderRect.center.dx;
+          final cy = borderRect.center.dy;
+          final t = denom > 0 ? (cx + cy) / denom : 0.0;
+          final pos = t * (nColors - 1);
+          final ci = pos.floor().clamp(0, nColors - 2);
+          final frac = pos - ci;
+          final c0 = rainbowColors[ci];
+          final c1 = rainbowColors[ci + 1];
+          canvas.drawRect(borderRect, ui.Paint()..color = ui.Color.from(
+            alpha: 1.0, red: c0.r * (1 - frac) + c1.r * frac,
+            green: c0.g * (1 - frac) + c1.g * frac,
+            blue: c0.b * (1 - frac) + c1.b * frac,
+          ));
+        } else {
+          final cellH = borderRect.height / stepsY;
+          for (int sx = 0; sx < stepsX; sx++) {
+            for (int sy = 0; sy < stepsY; sy++) {
+              final gx = borderRect.left + (sx + 0.5) * cellW;
+              final gy = borderRect.top + (sy + 0.5) * cellH;
+              final t = denom > 0 ? (gx + gy) / denom : 0.0;
+              final pos = t * (nColors - 1);
+              final ci = pos.floor().clamp(0, nColors - 2);
+              final frac = pos - ci;
+              final c0 = rainbowColors[ci];
+              final c1 = rainbowColors[ci + 1];
+              canvas.drawRect(
+                ui.Rect.fromLTWH(borderRect.left + sx * cellW, borderRect.top + sy * cellH,
+                  cellW.ceilToDouble(), cellH.ceilToDouble()),
+                ui.Paint()..color = ui.Color.from(
+                  alpha: 1.0, red: c0.r * (1 - frac) + c1.r * frac,
+                  green: c0.g * (1 - frac) + c1.g * frac,
+                  blue: c0.b * (1 - frac) + c1.b * frac,
+                ),
+              );
+            }
+          }
+        }
+      } else {
+        canvas.drawRect(borderRect, ui.Paint()..color = borderColor);
+      }
+    }
+
+    // 居中绘制图片
+    canvas.drawImageRect(
+      srcImage,
+      ui.Rect.fromLTWH(0, 0, srcImage.width.toDouble(), srcImage.height.toDouble()),
+      ui.Rect.fromLTWH(bw.toDouble(), bw.toDouble(), srcImage.width.toDouble(), srcImage.height.toDouble()),
+      ui.Paint()..filterQuality = ui.FilterQuality.medium,
+    );
+    srcImage.dispose();
+
+    final picture = recorder.endRecording();
+    ui.Image resultImage = await picture.toImage(canvasW, canvasH);
+    picture.dispose();
+
+    // 缩放预览
+    if (maxPreviewDim > 0 && (canvasW > maxPreviewDim || canvasH > maxPreviewDim)) {
+      final scale = maxPreviewDim / (canvasW > canvasH ? canvasW : canvasH).toDouble();
+      final outW = (canvasW * scale).round();
+      final outH = (canvasH * scale).round();
+      final scaledRecorder = ui.PictureRecorder();
+      final scaledCanvas = ui.Canvas(scaledRecorder);
+      scaledCanvas.drawImageRect(
+        resultImage,
+        ui.Rect.fromLTWH(0, 0, canvasW.toDouble(), canvasH.toDouble()),
+        ui.Rect.fromLTWH(0, 0, outW.toDouble(), outH.toDouble()),
+        ui.Paint()..filterQuality = ui.FilterQuality.high,
+      );
+      resultImage.dispose();
+      final scaledPicture = scaledRecorder.endRecording();
+      resultImage = await scaledPicture.toImage(outW, outH);
+      scaledPicture.dispose();
+    }
+
+    final pngData = await resultImage.toByteData(format: ui.ImageByteFormat.png);
+    resultImage.dispose();
+    if (pngData == null) throw Exception('PNG编码失败');
+    return pngData.buffer.asUint8List(pngData.offsetInBytes, pngData.lengthInBytes);
+  }
+
   /// 使用平台原生解码器异步解码图片
   static Future<ui.Image?> _decodeImageFromBytes(Uint8List bytes) async {
     final completer = Completer<ui.Image?>();
@@ -317,5 +440,15 @@ class ImageStitcherService {
     if (byteData == null) throw Exception('缩略图编码失败');
 
     return byteData.buffer.asUint8List();
+  }
+
+  /// 获取图片尺寸（不解码全图，只读取头部）
+  static Future<({int width, int height})?> getImageDimensions(Uint8List bytes) async {
+    final image = await _decodeImageFromBytes(bytes);
+    if (image == null) return null;
+    final w = image.width;
+    final h = image.height;
+    image.dispose();
+    return (width: w, height: h);
   }
 }
