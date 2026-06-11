@@ -4,6 +4,8 @@ import 'dart:typed_data';
 import 'package:path_provider/path_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:gal/gal.dart';
 import '../models/image_item.dart';
 import '../services/image_stitcher_service.dart';
 
@@ -356,18 +358,32 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _pickImages() async {
     try {
-      final result = await FilePicker.platform.pickFiles(type: FileType.custom, allowedExtensions: ['jpg', 'jpeg', 'png', 'bmp', 'webp', 'gif'], allowMultiple: true);
-      if (result == null || result.files.isEmpty) return;
-      for (var file in result.files) {
-        if (file.path == null) continue;
-        final item = ImageItem(file: File(file.path!), name: file.name ?? '');
-        setState(() => _selectedImages.add(item));
-        // 异步生成缩略图（5% 像素 ≈ 320x320 左右）
-        _generateThumbnail(item);
+      if (Platform.isAndroid) {
+        // Android: 使用原生相册选取（多选）
+        final images = await ImagePicker().pickMultiImage();
+        if (images.isEmpty) return;
+        for (var xFile in images) {
+          final item = ImageItem(file: File(xFile.path), name: xFile.name);
+          setState(() => _selectedImages.add(item));
+          _generateThumbnail(item);
+        }
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('已添加 ${images.length} 张图片'), duration: const Duration(seconds: 1)));
+        if (_selectedImages.length >= 2) _autoPreview();
+      } else {
+        // 其他平台：使用 file_picker
+        final result = await FilePicker.platform.pickFiles(type: FileType.custom, allowedExtensions: ['jpg', 'jpeg', 'png', 'bmp', 'webp', 'gif'], allowMultiple: true);
+        if (result == null || result.files.isEmpty) return;
+        for (var file in result.files) {
+          if (file.path == null) continue;
+          final item = ImageItem(file: File(file.path!), name: file.name ?? '');
+          setState(() => _selectedImages.add(item));
+          // 异步生成缩略图
+          _generateThumbnail(item);
+        }
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('已添加 ${result.files.length} 张图片'), duration: const Duration(seconds: 1)));
+        // 自动生成预览
+        if (_selectedImages.length >= 2) _autoPreview();
       }
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('已添加 ${result.files.length} 张图片'), duration: const Duration(seconds: 1)));
-      // 自动生成预览
-      if (_selectedImages.length >= 2) _autoPreview();
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('选择失败: $e')));
     }
@@ -440,9 +456,6 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _saveFromPreview() async {
     if (_selectedImages.length < 2) return;
-    final savePath = await _pickSavePath();
-    if (savePath == null) return;
-
     _startSaveTimer();
     setState(() { _isProcessing = true; _saveProgress = 0.0; });
     try {
@@ -456,9 +469,15 @@ class _HomeScreenState extends State<HomeScreen> {
         borderPercent: _borderPercent,
         rainbowBorder: _isRainbowBorder,
       );
-      await _writeBytesToPath(fullResBytes, savePath);
-      setState(() => _resultPath = savePath);
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('已保存至: $savePath'), duration: const Duration(seconds: 3)));
+      if (Platform.isAndroid || Platform.isIOS) {
+        await _saveToDeviceAlbum(fullResBytes);
+      } else {
+        final savePath = await _pickSavePath(bytes: fullResBytes);
+        if (savePath == null) return;
+        await _writeBytesToPath(fullResBytes, savePath);
+        setState(() => _resultPath = savePath);
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('已保存至: $savePath'), duration: const Duration(seconds: 3)));
+      }
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('保存失败: $e'), duration: const Duration(seconds: 5)));
     } finally {
@@ -469,9 +488,6 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _saveStitched() async {
     if (_selectedImages.length < 2) return;
-    final savePath = await _pickSavePath();
-    if (savePath == null) return;
-
     _startSaveTimer();
     setState(() { _isProcessing = true; _saveProgress = 0.0; });
     try {
@@ -485,14 +501,31 @@ class _HomeScreenState extends State<HomeScreen> {
         borderPercent: _borderPercent,
         rainbowBorder: _isRainbowBorder,
       );
-      await _writeBytesToPath(stitchedBytes, savePath);
-      setState(() => _resultPath = savePath);
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('已保存至: $savePath'), duration: const Duration(seconds: 3)));
+      if (Platform.isAndroid || Platform.isIOS) {
+        await _saveToDeviceAlbum(stitchedBytes);
+      } else {
+        final savePath = await _pickSavePath(bytes: stitchedBytes);
+        if (savePath == null) return;
+        await _writeBytesToPath(stitchedBytes, savePath);
+        setState(() => _resultPath = savePath);
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('已保存至: $savePath'), duration: const Duration(seconds: 3)));
+      }
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('拼接失败: $e')));
     } finally {
       _stopSaveTimer();
       if (mounted) setState(() { _isProcessing = false; _saveProgress = 0.0; });
+    }
+  }
+
+  /// 保存图片到系统相册的 Stitcher 相簿中（Android/iOS）
+  Future<void> _saveToDeviceAlbum(Uint8List bytes) async {
+    await Gal.putImageBytes(bytes, album: 'Stitcher');
+    setState(() => _resultPath = '相册 › Stitcher');
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('已保存到 Stitcher 相册'), duration: Duration(seconds: 2)),
+      );
     }
   }
 
@@ -506,13 +539,14 @@ class _HomeScreenState extends State<HomeScreen> {
     })), actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('完成'))]));
   }
 
-  /// 让用户选择保存路径，固定 PNG 格式
-  Future<String?> _pickSavePath() async {
+  /// 让用户选择保存路径，固定 PNG 格式。Android/iOS 需传入 bytes 直接写入
+  Future<String?> _pickSavePath({required Uint8List bytes}) async {
     final savedPath = await FilePicker.platform.saveFile(
       dialogTitle: '保存拼接后的图片',
       fileName: 'stitched_${_stitchMode == StitchMode.horizontal ? "H" : "V"}_${DateTime.now().millisecondsSinceEpoch}.png',
       type: FileType.custom,
       allowedExtensions: ['png'],
+      bytes: bytes,
     );
     if (savedPath == null || savedPath.isEmpty) return null;
     return savedPath;
