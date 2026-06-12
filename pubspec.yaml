@@ -18,6 +18,9 @@ dependencies:
   
   # Android 原生相册选取
   image_picker: ^1.2.1
+
+  # 相册管理（自定义画廊选择器）
+  photo_manager: ^3.8.1
   
   # 保存图片到系统相册（自定义相簿）
   gal: ^2.3.0

@@ -8,6 +8,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:gal/gal.dart';
 import '../models/image_item.dart';
 import '../services/image_stitcher_service.dart';
+import 'gallery_picker_screen.dart';
 
 /// 主界面 - 左右分栏布局
 class HomeScreen extends StatefulWidget {
@@ -1083,18 +1084,27 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _pickImages() async {
     try {
-      if (Platform.isAndroid) {
-        // Android: 使用原生相册选取（多选）
-        final images = await ImagePicker().pickMultiImage();
-        if (images.isEmpty) return;
+      if (Platform.isAndroid || Platform.isIOS) {
+        // Android/iOS: 使用自定义画廊选择器（可看到图片比例）
+        final results = await GalleryPickerScreen.pick(context);
+        if (results == null || results.isEmpty) return;
         final tasks = <Future<void>>[];
-        for (var xFile in images) {
-          final item = ImageItem(file: File(xFile.path), name: xFile.name);
+        for (var picked in results) {
+          final item = ImageItem(
+            file: picked.file,
+            name: picked.file.path.split('/').last,
+            originalWidth: picked.width,
+            originalHeight: picked.height,
+          );
           setState(() => _selectedImages.add(item));
           tasks.add(_generateThumbnail(item));
         }
-        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('已添加 ${images.length} 张图片'), duration: const Duration(seconds: 1)));
-        // 等所有缩略图生成完再自动预览
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('已添加 ${results.length} 张图片'),
+            duration: const Duration(seconds: 1),
+          ),
+        );
         await Future.wait(tasks);
         if (_selectedImages.isNotEmpty) _autoPreview();
       } else {
