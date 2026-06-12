@@ -1,8 +1,8 @@
-import 'dart:io';
 import 'dart:typed_data';
 
 class ImageItem {
-  final File file;
+  final Uint8List bytes;        // 图片原始字节（全平台可用）
+  final String path;            // 文件路径（仅 native 有实际路径，web 为文件名）
   final String name;
   Uint8List? thumbnailBytes;
   double? thumbWidth;
@@ -11,7 +11,8 @@ class ImageItem {
   int? originalHeight;
 
   ImageItem({
-    required this.file,
+    required this.bytes,
+    required this.path,
     required this.name,
     this.thumbnailBytes,
     this.thumbWidth,
@@ -33,7 +34,6 @@ class ImageItem {
     while (b != 0) { final t = b; b = a % b; a = t; }
     final g = a;
     final nw = w ~/ g, nh = h ~/ g;
-    // 映射常见比例到简短名称
     const map = <String, String>{
       '1:1': '1:1', '4:3': '4:3', '3:4': '3:4',
       '16:9': '16:9', '9:16': '9:16', '3:2': '3:2', '2:3': '2:3',
@@ -41,7 +41,6 @@ class ImageItem {
     };
     final key = '$nw:$nh';
     if (map.containsKey(key)) return map[key]!;
-    // 如果数值太大，近似到常见比例
     if (nw > 50 || nh > 50) {
       final r = w / h;
       if ((r - 1.0).abs() < 0.02) return '1:1';
@@ -57,6 +56,6 @@ class ImageItem {
 }
 
 enum StitchMode {
-  horizontal, // 按宽度对齐（水平拼接）
-  vertical,   // 按长度对齐（垂直拼接）
+  horizontal,
+  vertical,
 }

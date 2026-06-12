@@ -110,14 +110,27 @@ class ImageStitcherService {
     log('✅ 原始画布: ${canvasWidth}×${canvasHeight} ($pixelCount MP)');
     onProgress?.call(0.24);
 
-    // 计算输出缩放比例（预览模式）
+    // 计算输出缩放比例（预览模式 或 Web GPU 纹理上限保护）
     double scale = 1.0;
     int outW = canvasWidth, outH = canvasHeight;
-    if (maxPreviewDim > 0 && (canvasWidth > maxPreviewDim || canvasHeight > maxPreviewDim)) {
-      scale = maxPreviewDim / (canvasWidth > canvasHeight ? canvasWidth : canvasHeight).toDouble();
-      outW = (canvasWidth * scale).round();
-      outH = (canvasHeight * scale).round();
-      log('📐 缩放预览: ${(scale*100).toStringAsFixed(0)}% → ${outW}×${outH}');
+    // Web GPU 纹理上限 4096，超过会在 toImage() 时被裁剪导致缺角
+    final int safeMax = kIsWeb ? 4096 : 0;
+    final needScale = maxPreviewDim > 0 || safeMax > 0;
+    if (needScale) {
+      final int dimLimit;
+      if (maxPreviewDim > 0 && safeMax > 0) {
+        dimLimit = maxPreviewDim < safeMax ? maxPreviewDim : safeMax;
+      } else if (maxPreviewDim > 0) {
+        dimLimit = maxPreviewDim;
+      } else {
+        dimLimit = safeMax;
+      }
+      if (canvasWidth > dimLimit || canvasHeight > dimLimit) {
+        scale = dimLimit / (canvasWidth > canvasHeight ? canvasWidth : canvasHeight).toDouble();
+        outW = (canvasWidth * scale).round();
+        outH = (canvasHeight * scale).round();
+        log('📐 ${kIsWeb && maxPreviewDim == 0 ? "Web安全" : "预览"}缩放: ${(scale*100).toStringAsFixed(0)}% → ${outW}×${outH}');
+      }
     }
 
     // ========== Step 3: GPU Canvas 绘制 ==========
@@ -220,38 +233,17 @@ class ImageStitcherService {
     final picture = recorder.endRecording();
 
     // ========== Step 4: GPU 渲染为 Image ==========
-    log('GPU 渲染 toImage 中 (${canvasWidth}×${canvasHeight})...');
+    // 需要缩放时直接用 outW×outH 渲染，避免 Web 超大画布超出 GPU 纹理上限
+    final renderW = scale < 1.0 ? outW : canvasWidth;
+    final renderH = scale < 1.0 ? outH : canvasHeight;
+    log('GPU 渲染 toImage 中 (${renderW}×${renderH})...');
     onProgress?.call(0.74);
-    final resultImage = await picture.toImage(canvasWidth, canvasHeight);
+    ui.Image encodeImage = await picture.toImage(renderW, renderH);
     picture.dispose();
-    log('✅ 渲染完成: ${resultImage.width}×${resultImage.height}');
-    onProgress?.call(0.80);
+    log('✅ 渲染完成: ${encodeImage.width}×${encodeImage.height}');
+    onProgress?.call(0.88);
 
-    // ========== Step 5: 缩放（仅预览时） ==========
-    ui.Image encodeImage = resultImage;
-
-    if (scale < 1.0) {
-      log('缩放中... ${canvasWidth}×${canvasHeight} → ${outW}×${outH}');
-      onProgress?.call(0.82);
-      final scaledRecorder = ui.PictureRecorder();
-      final scaledCanvas = ui.Canvas(scaledRecorder);
-      scaledCanvas.drawImageRect(
-        resultImage,
-        ui.Rect.fromLTWH(0, 0, canvasWidth.toDouble(), canvasHeight.toDouble()),
-        ui.Rect.fromLTWH(0, 0, outW.toDouble(), outH.toDouble()),
-        ui.Paint()..filterQuality = ui.FilterQuality.high,
-      );
-      resultImage.dispose();
-      final scaledPicture = scaledRecorder.endRecording();
-
-      onProgress?.call(0.86);
-      encodeImage = await scaledPicture.toImage(outW, outH);
-      scaledPicture.dispose();
-      log('✅ 缩放完成: ${encodeImage.width}×${encodeImage.height}, 像素数 ↓${((1-scale*scale).abs()*100).toStringAsFixed(0)}%');
-      onProgress?.call(0.88);
-    }
-
-    // ========== Step 6: PNG 编码导出 ==========
+    // ========== Step 5: PNG 编码导出 ==========
     final mp = (encodeImage.width * encodeImage.height / 1000000).toStringAsFixed(1);
     log('PNG 编码中 ($mp MP)...');
     onProgress?.call(0.90);

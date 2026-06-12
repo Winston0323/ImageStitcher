@@ -1,13 +1,14 @@
 import 'dart:async';
-import 'dart:io';
+import 'dart:io' show Platform, File;
 import 'dart:typed_data';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:path_provider/path_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
-import 'package:image_picker/image_picker.dart';
 import 'package:gal/gal.dart';
 import '../models/image_item.dart';
 import '../services/image_stitcher_service.dart';
+import '../screens/save_image.dart';
 import 'gallery_picker_screen.dart';
 
 /// 主界面 - 左右分栏布局
@@ -19,6 +20,12 @@ class HomeScreen extends StatefulWidget {
 }
 
 enum _ActiveTool { mode, border, image }
+
+class _TileData {
+  final int index;
+  final double height;
+  const _TileData({required this.index, required this.height});
+}
 
 class _HomeScreenState extends State<HomeScreen> {
   final List<ImageItem> _selectedImages = [];
@@ -41,64 +48,12 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget build(BuildContext context) {
     final isWide = MediaQuery.of(context).size.width >= 600;
 
-    final panel = <Widget>[
-      const SizedBox(height: 12),
-    ];
-
     Widget body;
     if (isWide) {
-      // 桌面/平板宽屏：左右分栏
-      if (Platform.isAndroid) {
-        // Android 平板宽屏：预览居中，无分割线，不可滚动
-        body = Padding(
-          padding: const EdgeInsets.all(8),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Expanded(
-                flex: 1,
-                child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-                  const Spacer(),
-                  _buildSubToolbar(),
-                  _buildBottomToolbar(),
-                ]),
-              ),
-              const SizedBox(width: 8),
-              Expanded(flex: 2, child: Center(child: _buildPreviewPanel())),
-            ],
-          ),
-        );
-      } else {
-        body = Padding(
-          padding: const EdgeInsets.all(12),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Expanded(
-                flex: 1,
-                child: Column(
-                  children: [
-                    Expanded(
-                      child: SingleChildScrollView(
-                        child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: panel),
-                      ),
-                    ),
-                    _buildSubToolbar(),
-                    _buildBottomToolbar(),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 12),
-              Container(width: 1, color: Colors.grey.shade300),
-              const SizedBox(width: 12),
-              Expanded(flex: 2, child: _buildPreviewPanel()),
-            ],
-          ),
-        );
-      }
+      body = _buildWideLayout();
     } else {
       // 窄屏（手机）
-      if (Platform.isAndroid) {
+      if (!kIsWeb && Platform.isAndroid) {
         body = _buildAndroidNarrowLayout();
       } else {
         body = Padding(
@@ -136,7 +91,7 @@ class _HomeScreenState extends State<HomeScreen> {
   // ========== 预览面板（常驻）==========
 
   Widget _buildPreviewPanel() {
-    if (Platform.isAndroid) return _buildAndroidPreview();
+    if (!kIsWeb && Platform.isAndroid) return _buildAndroidPreview();
     return Card(
       elevation: 4,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
@@ -280,6 +235,142 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ),
       ],
+    );
+  }
+
+  // ========== 宽屏布局 ==========
+
+  /// 宽屏：左侧三张功能卡片 + 右侧预览
+  Widget _buildWideLayout() {
+    return Padding(
+      padding: const EdgeInsets.all(16),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // 左侧三张独立卡片
+          SizedBox(
+            width: 280,
+            child: SingleChildScrollView(
+              child: Column(
+                children: [
+                  _buildImageCard(),
+                  const SizedBox(height: 12),
+                  _buildModeCard(),
+                  const SizedBox(height: 12),
+                  _buildBorderCard(),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(width: 16),
+          // 右侧预览
+          Expanded(child: _buildPreviewPanel()),
+        ],
+      ),
+    );
+  }
+
+  // ---- 三张功能卡片（始终展开）----
+
+  /// 选择图片卡片
+  Widget _buildImageCard() {
+    return _wideCard(
+      icon: Icons.add_photo_alternate_outlined,
+      title: '选择图片',
+      subtitle: _selectedImages.isEmpty ? '未添加' : '已添加 ${_selectedImages.length} 张',
+      onClear: _selectedImages.isNotEmpty ? () => setState(() { _selectedImages.clear(); _previewBytes = null; }) : null,
+      child: _buildImageContentWide(),
+    );
+  }
+
+  /// 拼接模式卡片
+  Widget _buildModeCard() {
+    final disabled = _selectedImages.length <= 1;
+    return _wideCard(
+      icon: Icons.settings_suggest,
+      title: '拼接模式',
+      subtitle: disabled ? '至少需要 2 张图' : (_stitchMode == StitchMode.horizontal ? '水平拼接' : '垂直拼接'),
+      enabled: !disabled,
+      child: _buildModeSubToolbar(),
+    );
+  }
+
+  /// 边框卡片
+  Widget _buildBorderCard() {
+    return _wideCard(
+      icon: Icons.border_style,
+      title: '边框',
+      subtitle: _borderPercent > 0
+          ? '${_borderColorIndex == 0 ? "白色" : _borderColorIndex == 1 ? "黑色" : "彩虹"} · ${_borderPercent.toInt()}%'
+          : '无边框',
+      child: _buildBorderSubToolbar(),
+    );
+  }
+
+  /// 通用宽屏卡片（始终展开）
+  Widget _wideCard({
+    required IconData icon,
+    required String title,
+    required String subtitle,
+    Widget? child,
+    VoidCallback? onClear,
+    bool enabled = true,
+  }) {
+    final disabled = !enabled;
+
+    return Card(
+      elevation: 1,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // 卡片头部
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            decoration: BoxDecoration(
+              color: Theme.of(context).colorScheme.primaryContainer.withValues(alpha: 0.35),
+            ),
+            child: Row(
+              children: [
+                Icon(icon, size: 20,
+                    color: disabled ? Colors.grey[400] : Theme.of(context).colorScheme.primary),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(title, style: TextStyle(
+                          fontSize: 13, fontWeight: FontWeight.w600,
+                          color: disabled ? Colors.grey[400] : null)),
+                      const SizedBox(height: 2),
+                      Text(subtitle, style: TextStyle(
+                          fontSize: 11,
+                          color: disabled ? Colors.grey[400] : Colors.grey[600])),
+                    ],
+                  ),
+                ),
+                if (onClear != null)
+                  SizedBox(
+                    width: 28, height: 28,
+                    child: IconButton(
+                      visualDensity: VisualDensity.compact,
+                      padding: EdgeInsets.zero,
+                      icon: Icon(Icons.delete_outline, size: 18, color: Colors.red[400]),
+                      onPressed: onClear,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          // 内容区（始终可见）
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
+            child: child ?? const SizedBox.shrink(),
+          ),
+        ],
+      ),
     );
   }
 
@@ -446,7 +537,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // ========== 子工具栏（显示在主工具栏上方）==========
 
-  /// 子工具栏容器
+  /// 子工具栏容器（窄屏用）
   Widget _buildSubToolbar() {
     if (_activeTool == null) return const SizedBox.shrink();
 
@@ -463,45 +554,41 @@ class _HomeScreenState extends State<HomeScreen> {
         break;
     }
 
-    final needsScroll = _activeTool == _ActiveTool.mode;
-
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      child: needsScroll
-          ? SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: content,
-            )
-          : content,
+      child: content,
     );
   }
 
   // --- 拼接模式子工具栏 ---
   Widget _buildModeSubToolbar() {
-    return Row(
-      children: [
-        _subChip(
-          icon: Icons.view_column,
-          label: '水平',
-          hint: '横向排列',
-          selected: _stitchMode == StitchMode.horizontal,
-          onTap: () {
-            setState(() => _stitchMode = StitchMode.horizontal);
-            _autoPreview();
-          },
-        ),
-        const SizedBox(width: 8),
-        _subChip(
-          icon: Icons.view_stream,
-          label: '垂直',
-          hint: '纵向排列',
-          selected: _stitchMode == StitchMode.vertical,
-          onTap: () {
-            setState(() => _stitchMode = StitchMode.vertical);
-            _autoPreview();
-          },
-        ),
-      ],
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Row(
+        children: [
+          _subChip(
+            icon: Icons.view_column,
+            label: '水平',
+            hint: '横向排列',
+            selected: _stitchMode == StitchMode.horizontal,
+            onTap: () {
+              setState(() => _stitchMode = StitchMode.horizontal);
+              _autoPreview();
+            },
+          ),
+          const SizedBox(width: 8),
+          _subChip(
+            icon: Icons.view_stream,
+            label: '垂直',
+            hint: '纵向排列',
+            selected: _stitchMode == StitchMode.vertical,
+            onTap: () {
+              setState(() => _stitchMode = StitchMode.vertical);
+              _autoPreview();
+            },
+          ),
+        ],
+      ),
     );
   }
 
@@ -510,39 +597,42 @@ class _HomeScreenState extends State<HomeScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // 第一栏：颜色选择
-        Row(
-          children: [
-            _subChip(
-              color: Colors.white,
-              label: '白色',
-              selected: _borderColorIndex == 0,
-              onTap: () {
-                setState(() => _borderColorIndex = 0);
-                _autoPreview();
-              },
-            ),
-            const SizedBox(width: 8),
-            _subChip(
-              color: Colors.black,
-              label: '黑色',
-              selected: _borderColorIndex == 1,
-              onTap: () {
-                setState(() => _borderColorIndex = 1);
-                _autoPreview();
-              },
-            ),
-            const SizedBox(width: 8),
-            _subChip(
-              icon: Icons.gradient,
-              label: '彩虹',
-              selected: _borderColorIndex == 2,
-              onTap: () {
-                setState(() => _borderColorIndex = 2);
-                _autoPreview();
-              },
-            ),
-          ],
+        // 第一栏：颜色选择（横向可滚动，防止溢出卡片）
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: Row(
+            children: [
+              _subChip(
+                color: Colors.white,
+                label: '白色',
+                selected: _borderColorIndex == 0,
+                onTap: () {
+                  setState(() => _borderColorIndex = 0);
+                  _autoPreview();
+                },
+              ),
+              const SizedBox(width: 8),
+              _subChip(
+                color: Colors.black,
+                label: '黑色',
+                selected: _borderColorIndex == 1,
+                onTap: () {
+                  setState(() => _borderColorIndex = 1);
+                  _autoPreview();
+                },
+              ),
+              const SizedBox(width: 8),
+              _subChip(
+                icon: Icons.gradient,
+                label: '彩虹',
+                selected: _borderColorIndex == 2,
+                onTap: () {
+                  setState(() => _borderColorIndex = 2);
+                  _autoPreview();
+                },
+              ),
+            ],
+          ),
         ),
         const SizedBox(height: 4),
         // 第二栏：粗细调节
@@ -638,7 +728,7 @@ class _HomeScreenState extends State<HomeScreen> {
               itemBuilder: (_, index) {
                 final item = _selectedImages[index];
                 return ReorderableDelayedDragStartListener(
-                  key: ValueKey(item.file.path),
+                  key: ValueKey(item.path),
                   index: index,
                   child: _imageThumbItem(index, thumbHeight),
                 );
@@ -681,7 +771,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   borderRadius: BorderRadius.circular(8),
                   child: item.thumbnailBytes != null
                       ? Image.memory(item.thumbnailBytes!, fit: BoxFit.cover)
-                      : Image.file(item.file, fit: BoxFit.cover,
+                      : Image.memory(item.bytes, fit: BoxFit.cover,
                           errorBuilder: (_, __, ___) => _placeholderIcon()),
                 ),
               ),
@@ -720,6 +810,137 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+
+  // --- 宽屏选择图片瀑布流 ---
+
+  Widget _buildImageContentWide() {
+    final thumbnailCount = _selectedImages.length;
+
+    // empty state
+    if (thumbnailCount == 0) {
+      return SizedBox(
+        height: 48,
+        child: ElevatedButton.icon(
+          onPressed: _pickImages,
+          icon: const Icon(Icons.add, size: 18),
+          label: const Text('添加图片'),
+          style: ElevatedButton.styleFrom(minimumSize: const Size(double.infinity, 40)),
+        ),
+      );
+    }
+
+    // 2 列瀑布流，按原图比例计算高度
+    const cols = 2;
+    const gap = 6.0;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        // 添加按钮
+        SizedBox(
+          height: 40,
+          child: OutlinedButton.icon(
+            onPressed: _pickImages,
+            icon: const Icon(Icons.add_photo_alternate_outlined, size: 16),
+            label: const Text('继续添加', style: TextStyle(fontSize: 12)),
+            style: OutlinedButton.styleFrom(
+              minimumSize: const Size(double.infinity, 40),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+            ),
+          ),
+        ),
+        const SizedBox(height: 8),
+        // 瀑布流缩略图（两列）
+        LayoutBuilder(
+          builder: (_, constraints) {
+            final tileW = (constraints.maxWidth - gap) / cols;
+
+            final tiles = <_TileData>[];
+            for (var i = 0; i < thumbnailCount; i++) {
+              final item = _selectedImages[i];
+              final ar = (item.thumbWidth != null && item.thumbHeight != null && item.thumbHeight! > 0)
+                  ? item.thumbWidth! / item.thumbHeight!
+                  : 1.0;
+              tiles.add(_TileData(index: i, height: tileW / ar));
+            }
+
+            return Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                for (var c = 0; c < cols; c++) ...[
+                  if (c > 0) const SizedBox(width: gap),
+                  Expanded(
+                    child: Column(
+                      children: [
+                        for (var i = c; i < tiles.length; i += cols)
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: gap),
+                            child: _wideImageTile(tiles[i].index, tileW, tiles[i].height),
+                          ),
+                      ],
+                    ),
+                  ),
+                ],
+              ],
+            );
+          },
+        ),
+      ],
+    );
+  }
+
+  Widget _wideImageTile(int index, double w, double h) {
+    final item = _selectedImages[index];
+    return GestureDetector(
+      onTap: () => setState(() {
+        _selectedImages.removeAt(index);
+        _autoPreview();
+      }),
+      child: Container(
+        width: w,
+        height: h,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(6),
+          color: Colors.grey[800],
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            item.thumbnailBytes != null
+                ? Image.memory(item.thumbnailBytes!, fit: BoxFit.cover)
+                : Image.memory(item.bytes, fit: BoxFit.cover),
+            // 序号角标
+            Positioned(
+              top: 2, left: 2,
+              child: Container(
+                width: 16, height: 16,
+                decoration: BoxDecoration(
+                  color: Theme.of(context).colorScheme.primary,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                alignment: Alignment.center,
+                child: Text('${index + 1}',
+                    style: const TextStyle(fontSize: 9, color: Colors.white, fontWeight: FontWeight.bold)),
+              ),
+            ),
+            // 删除 X
+            Positioned(
+              top: 2, right: 2,
+              child: Container(
+                width: 16, height: 16,
+                decoration: const BoxDecoration(
+                  color: Colors.black45,
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(Icons.close, size: 10, color: Colors.white),
+              ),
+            ),
+          ],
         ),
       ),
     );
@@ -1011,7 +1232,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       itemBuilder: (_, index) {
                         final item = _selectedImages[index];
                         return Dismissible(
-                          key: ValueKey('sheet_${item.file.path}'),
+                          key: ValueKey('sheet_${item.path}'),
                           direction: DismissDirection.endToStart,
                           onDismissed: (_) {
                             setState(() => _selectedImages.removeAt(index));
@@ -1033,7 +1254,7 @@ class _HomeScreenState extends State<HomeScreen> {
                             dense: true,
                             leading: ClipRRect(
                               borderRadius: BorderRadius.circular(4),
-                              child: Image.file(item.file, width: 44, height: 44,
+                              child: Image.memory(item.bytes, width: 44, height: 44,
                                   fit: BoxFit.cover,
                                   errorBuilder: (_, __, ___) => _placeholderIcon()),
                             ),
@@ -1084,15 +1305,16 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _pickImages() async {
     try {
-      if (Platform.isAndroid || Platform.isIOS) {
-        // Android/iOS: 使用自定义画廊选择器（可看到图片比例）
+      if (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) {
+        // Android/iOS: 使用原生图片选择器
         final results = await GalleryPickerScreen.pick(context);
         if (results == null || results.isEmpty) return;
         final tasks = <Future<void>>[];
         for (var picked in results) {
           final item = ImageItem(
-            file: picked.file,
-            name: picked.file.path.split('/').last,
+            bytes: picked.bytes,
+            path: picked.path,
+            name: picked.name,
             originalWidth: picked.width,
             originalHeight: picked.height,
           );
@@ -1108,18 +1330,34 @@ class _HomeScreenState extends State<HomeScreen> {
         await Future.wait(tasks);
         if (_selectedImages.isNotEmpty) _autoPreview();
       } else {
-        // 其他平台：使用 file_picker
-        final result = await FilePicker.platform.pickFiles(type: FileType.custom, allowedExtensions: ['jpg', 'jpeg', 'png', 'bmp', 'webp', 'gif'], allowMultiple: true);
+        // 桌面 / Web：使用 file_picker
+        final result = await FilePicker.platform.pickFiles(
+          type: FileType.custom,
+          allowedExtensions: ['jpg', 'jpeg', 'png', 'bmp', 'webp', 'gif'],
+          allowMultiple: true,
+          withData: true, // 始终请求 bytes 数据
+        );
         if (result == null || result.files.isEmpty) return;
         final tasks = <Future<void>>[];
         for (var file in result.files) {
-          if (file.path == null) continue;
-          final item = ImageItem(file: File(file.path!), name: file.name ?? '');
+          // Web 上优先用 bytes，native 从文件读取
+          Uint8List data;
+          if (file.bytes != null) {
+            data = file.bytes!;
+          } else if (file.path != null) {
+            data = await File(file.path!).readAsBytes();
+          } else {
+            continue;
+          }
+          final item = ImageItem(
+            bytes: data,
+            path: file.name,
+            name: file.name,
+          );
           setState(() => _selectedImages.add(item));
           tasks.add(_generateThumbnail(item));
         }
         if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('已添加 ${result.files.length} 张图片'), duration: const Duration(seconds: 1)));
-        // 等所有缩略图生成完再自动预览
         await Future.wait(tasks);
         if (_selectedImages.isNotEmpty) _autoPreview();
       }
@@ -1130,8 +1368,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _generateThumbnail(ImageItem item) async {
     try {
-      final bytes = await item.file.readAsBytes();
-      final thumb = await ImageStitcherService.createThumbnail(bytes, percent: 10);
+      final thumb = await ImageStitcherService.createThumbnail(item.bytes, percent: 10);
       // 解码缩略图获取尺寸
       final dims = await ImageStitcherService.getImageDimensions(thumb);
       if (mounted) {
@@ -1219,8 +1456,13 @@ class _HomeScreenState extends State<HomeScreen> {
         borderPercent: _borderPercent,
         rainbowBorder: _isRainbowBorder,
       );
-      if (Platform.isAndroid || Platform.isIOS) {
+      if (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) {
         await _saveToDeviceAlbum(fullResBytes);
+      } else if (kIsWeb) {
+        // Web: 触发浏览器下载
+        final fileName = 'stitched_${_stitchMode == StitchMode.horizontal ? "H" : "V"}_${DateTime.now().millisecondsSinceEpoch}.png';
+        await saveImage(fullResBytes, fileName);
+        if (mounted) _showSaveSuccessDialog('已保存');
       } else {
         final savePath = await _pickSavePath(bytes: fullResBytes);
         if (savePath == null) return;
@@ -1271,7 +1513,7 @@ class _HomeScreenState extends State<HomeScreen> {
       setState(() { if (newIndex > oldIndex) newIndex--; final item = reordered.removeAt(oldIndex); reordered.insert(newIndex, item); _selectedImages.clear(); _selectedImages.addAll(reordered); }); _autoPreview();
     }, itemBuilder: (ctx, index) {
       final item = reordered[index];
-      return ListTile(key: ValueKey(item.file.path), dense: true, contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2), leading: CircleAvatar(radius: 14, backgroundColor: Theme.of(ctx).colorScheme.primary, foregroundColor: Colors.white, child: Text('${index + 1}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold))), title: Text(item.name, overflow: TextOverflow.ellipsis, maxLines: 1, style: const TextStyle(fontSize: 13)), trailing: const Icon(Icons.drag_handle, color: Colors.grey, size: 20));
+      return ListTile(key: ValueKey(item.path), dense: true, contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2), leading: CircleAvatar(radius: 14, backgroundColor: Theme.of(ctx).colorScheme.primary, foregroundColor: Colors.white, child: Text('${index + 1}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold))), title: Text(item.name, overflow: TextOverflow.ellipsis, maxLines: 1, style: const TextStyle(fontSize: 13)), trailing: const Icon(Icons.drag_handle, color: Colors.grey, size: 20));
     })), actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('完成'))]));
   }
 
@@ -1301,7 +1543,7 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  Future<List<Uint8List>> _getSelectedImageBytes() async => [for (var item in _selectedImages) await item.file.readAsBytes()];
+  Future<List<Uint8List>> _getSelectedImageBytes() async => [for (var item in _selectedImages) item.bytes];
 
   /// 获取所有图片的缩略图字节，如果任意缩略图尚未生成则返回 null
   Future<List<Uint8List>?> _getThumbnailBytes() async {
