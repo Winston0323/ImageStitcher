@@ -110,26 +110,25 @@ class ImageStitcherService {
     log('✅ 原始画布: ${canvasWidth}×${canvasHeight} ($pixelCount MP)');
     onProgress?.call(0.24);
 
-    // 计算输出缩放比例（预览模式 或 Web GPU 纹理上限保护）
+    // 计算输出缩放比例
+    // 预览：限制最大边长加速渲染；保存：不缩放，保留原图画质
+    // Web 保存仅在超过 16383 时兜底（桌面 Chrome GPU 上限）
     double scale = 1.0;
     int outW = canvasWidth, outH = canvasHeight;
-    // Web GPU 纹理上限 4096，超过会在 toImage() 时被裁剪导致缺角
-    final int safeMax = kIsWeb ? 4096 : 0;
-    final needScale = maxPreviewDim > 0 || safeMax > 0;
-    if (needScale) {
-      final int dimLimit;
-      if (maxPreviewDim > 0 && safeMax > 0) {
-        dimLimit = maxPreviewDim < safeMax ? maxPreviewDim : safeMax;
-      } else if (maxPreviewDim > 0) {
-        dimLimit = maxPreviewDim;
-      } else {
-        dimLimit = safeMax;
-      }
-      if (canvasWidth > dimLimit || canvasHeight > dimLimit) {
-        scale = dimLimit / (canvasWidth > canvasHeight ? canvasWidth : canvasHeight).toDouble();
+    if (maxPreviewDim > 0) {
+      if (canvasWidth > maxPreviewDim || canvasHeight > maxPreviewDim) {
+        scale = maxPreviewDim / (canvasWidth > canvasHeight ? canvasWidth : canvasHeight).toDouble();
         outW = (canvasWidth * scale).round();
         outH = (canvasHeight * scale).round();
-        log('📐 ${kIsWeb && maxPreviewDim == 0 ? "Web安全" : "预览"}缩放: ${(scale*100).toStringAsFixed(0)}% → ${outW}×${outH}');
+        log('📐 预览缩放: ${(scale*100).toStringAsFixed(0)}% → ${outW}×${outH}');
+      }
+    } else if (kIsWeb) {
+      const int webSaveMax = 16383;
+      if (canvasWidth > webSaveMax || canvasHeight > webSaveMax) {
+        scale = webSaveMax / (canvasWidth > canvasHeight ? canvasWidth : canvasHeight).toDouble();
+        outW = (canvasWidth * scale).round();
+        outH = (canvasHeight * scale).round();
+        log('📐 Web保存缩放: ${(scale*100).toStringAsFixed(0)}% → ${outW}×${outH}');
       }
     }
 
@@ -138,9 +137,17 @@ class ImageStitcherService {
     final recorder = ui.PictureRecorder();
     final canvas = ui.Canvas(recorder);
 
-    // 白色背景
+    // 输出尺寸：缩放时用 outW×outH，否则原始尺寸
+    final int drawW = scale < 1.0 ? outW : canvasWidth;
+    final int drawH = scale < 1.0 ? outH : canvasHeight;
+    final double s = scale < 1.0 ? scale : 1.0;
+
+    ui.Rect scaledRect(double l, double t, double w, double h) =>
+        ui.Rect.fromLTWH(l * s, t * s, w * s, h * s);
+
+    // 白色背景（输出尺寸）
     canvas.drawRect(
-      ui.Rect.fromLTWH(0, 0, canvasWidth.toDouble(), canvasHeight.toDouble()),
+      ui.Rect.fromLTWH(0, 0, drawW.toDouble(), drawH.toDouble()),
       ui.Paint()..color = const ui.Color(0xFFFFFFFF),
     );
 
@@ -149,12 +156,11 @@ class ImageStitcherService {
       final dst = dstRects[i];
 
       if (addBorder) {
-        final borderRect = ui.Rect.fromLTWH(
+        final borderRect = scaledRect(
           dst.left - bw, dst.top - bw,
           dst.width + 2 * bw, dst.height + 2 * bw,
         );
         if (rainbowBorder) {
-          // 按像素在画布上的位置计算颜色，左上角→右下角 hue 渐变
           final rainbowColors = [
             const ui.Color(0xFFFF0000),
             const ui.Color(0xFFFF7F00),
@@ -165,13 +171,11 @@ class ImageStitcherService {
             const ui.Color(0xFF8B00FF),
           ];
           final nColors = rainbowColors.length;
-          final denom = (canvasWidth + canvasHeight).toDouble();
-          // 网格化：按边框矩形实际尺寸分配步数，保证横向和竖向右大致相同的像素密度
+          final denom = (drawW + drawH).toDouble();
           final stepsX = math.max(1, math.min(256, borderRect.width.round()));
           final cellW = borderRect.width / stepsX;
           final stepsY = math.max(1, math.min(256, borderRect.height.round()));
           if (stepsY < 1) {
-            // 边框太窄，画一条即可
             final cx = borderRect.center.dx;
             final cy = borderRect.center.dy;
             final t = denom > 0 ? (cx + cy) / denom : 0.0;
@@ -212,17 +216,14 @@ class ImageStitcherService {
             }
           }
         } else {
-          canvas.drawRect(
-            borderRect,
-            ui.Paint()..color = borderColor,
-          );
+          canvas.drawRect(borderRect, ui.Paint()..color = borderColor);
         }
       }
 
       canvas.drawImageRect(
         src,
         ui.Rect.fromLTWH(0, 0, src.width.toDouble(), src.height.toDouble()),
-        dst,
+        scaledRect(dst.left, dst.top, dst.width, dst.height),
         ui.Paint()..filterQuality = ui.FilterQuality.medium,
       );
       onProgress?.call(0.24 + 0.48 * ((i + 1) / decodedImages.length));
@@ -233,12 +234,10 @@ class ImageStitcherService {
     final picture = recorder.endRecording();
 
     // ========== Step 4: GPU 渲染为 Image ==========
-    // 需要缩放时直接用 outW×outH 渲染，避免 Web 超大画布超出 GPU 纹理上限
-    final renderW = scale < 1.0 ? outW : canvasWidth;
-    final renderH = scale < 1.0 ? outH : canvasHeight;
-    log('GPU 渲染 toImage 中 (${renderW}×${renderH})...');
+    // 所有坐标已缩放到 drawW×drawH 内，直接渲染
+    log('GPU 渲染 toImage 中 (${drawW}×${drawH})...');
     onProgress?.call(0.74);
-    ui.Image encodeImage = await picture.toImage(renderW, renderH);
+    ui.Image encodeImage = await picture.toImage(drawW, drawH);
     picture.dispose();
     log('✅ 渲染完成: ${encodeImage.width}×${encodeImage.height}');
     onProgress?.call(0.88);
