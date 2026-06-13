@@ -29,6 +29,7 @@ dependencies:
   
   # UI 组件
   cupertino_icons: ^1.0.6
+  image: ^4.9.1
 
 dev_dependencies:
   flutter_test:

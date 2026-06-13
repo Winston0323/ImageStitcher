@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:math' as math;
+import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:flutter/foundation.dart';
+import 'package:image/image.dart' as img;
 
 import '../models/image_item.dart';
 
@@ -234,24 +236,74 @@ class ImageStitcherService {
     final picture = recorder.endRecording();
 
     // ========== Step 4: GPU 渲染为 Image ==========
-    // 所有坐标已缩放到 drawW×drawH 内，直接渲染
-    log('GPU 渲染 toImage 中 (${drawW}×${drawH})...');
-    onProgress?.call(0.74);
-    ui.Image encodeImage = await picture.toImage(drawW, drawH);
+    // Web: 超出 4090 时分块渲染，绕过 GPU 纹理上限
+    const int gpuLimit = 4090;
+    Uint8List outputBytes;
+
+    if (kIsWeb && (drawW > gpuLimit || drawH > gpuLimit)) {
+      log('🔲 Web分块渲染: ${drawW}×${drawH} (上限${gpuLimit}px)...');
+      onProgress?.call(0.74);
+      final fullRgba = Uint8List(drawW * drawH * 4);
+      final tilesX = (drawW + gpuLimit - 1) ~/ gpuLimit;
+      final tilesY = (drawH + gpuLimit - 1) ~/ gpuLimit;
+      final tileCount = tilesX * tilesY;
+      var tileIdx = 0;
+
+      for (int ty = 0; ty < drawH; ty += gpuLimit) {
+        for (int tx = 0; tx < drawW; tx += gpuLimit) {
+          final tW = math.min(gpuLimit, drawW - tx);
+          final tH = math.min(gpuLimit, drawH - ty);
+          tileIdx++;
+
+          final tileRec = ui.PictureRecorder();
+          final tileCanvas = ui.Canvas(tileRec);
+          tileCanvas.clipRect(ui.Rect.fromLTWH(0, 0, tW.toDouble(), tH.toDouble()));
+          tileCanvas.translate(-tx.toDouble(), -ty.toDouble());
+          tileCanvas.drawPicture(picture);
+          final tilePic = tileRec.endRecording();
+
+          final tileImg = await tilePic.toImage(tW, tH);
+          tilePic.dispose();
+          final tileBytes = await tileImg.toByteData(format: ui.ImageByteFormat.rawRgba);
+          tileImg.dispose();
+
+          if (tileBytes != null) {
+            final src = tileBytes.buffer.asUint8List(tileBytes.offsetInBytes, tW * tH * 4);
+            for (int y = 0; y < tH; y++) {
+              final dstOff = ((ty + y) * drawW + tx) * 4;
+              final srcOff = y * tW * 4;
+              for (int x = 0; x < tW * 4; x++) {
+                fullRgba[dstOff + x] = src[srcOff + x];
+              }
+            }
+          }
+          onProgress?.call(0.74 + 0.12 * tileIdx / tileCount);
+        }
+      }
+
+      log('PNG 编码中...');
+      onProgress?.call(0.88);
+      final png = img.Image.fromBytes(width: drawW, height: drawH, numChannels: 4, bytes: fullRgba.buffer, rowStride: drawW * 4);
+      outputBytes = Uint8List.fromList(img.encodePng(png));
+      log('✅ 分块渲染完成! 文件大小: ${(outputBytes.lengthInBytes / 1024).toStringAsFixed(1)} KB');
+    } else {
+      log('GPU 渲染 toImage 中 (${drawW}×${drawH})...');
+      onProgress?.call(0.74);
+      ui.Image encodeImage = await picture.toImage(drawW, drawH);
+      log('✅ 渲染完成: ${encodeImage.width}×${encodeImage.height}');
+      onProgress?.call(0.88);
+
+      final mp = (encodeImage.width * encodeImage.height / 1000000).toStringAsFixed(1);
+      log('PNG 编码中 ($mp MP)...');
+      onProgress?.call(0.90);
+      final pngByteData = await encodeImage.toByteData(format: ui.ImageByteFormat.png);
+      encodeImage.dispose();
+      if (pngByteData == null) throw Exception('PNG编码失败');
+      outputBytes = pngByteData.buffer.asUint8List(pngByteData.offsetInBytes, pngByteData.lengthInBytes);
+      log('✅ PNG 导出完成! 文件大小: ${(outputBytes.length / 1024).toStringAsFixed(1)} KB');
+    }
+
     picture.dispose();
-    log('✅ 渲染完成: ${encodeImage.width}×${encodeImage.height}');
-    onProgress?.call(0.88);
-
-    // ========== Step 5: PNG 编码导出 ==========
-    final mp = (encodeImage.width * encodeImage.height / 1000000).toStringAsFixed(1);
-    log('PNG 编码中 ($mp MP)...');
-    onProgress?.call(0.90);
-    final pngByteData = await encodeImage.toByteData(format: ui.ImageByteFormat.png);
-    encodeImage.dispose();
-    if (pngByteData == null) throw Exception('PNG编码失败');
-    final outputBytes = pngByteData.buffer.asUint8List(pngByteData.offsetInBytes, pngByteData.lengthInBytes);
-    log('✅ PNG 导出完成! 文件大小: ${(outputBytes.length / 1024).toStringAsFixed(1)} KB');
-
     onProgress?.call(1.0);
     log('═══ 全部完成，总耗时: ${sw.elapsedMilliseconds}ms ═══');
     return outputBytes;
