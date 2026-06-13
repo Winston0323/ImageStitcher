@@ -3,9 +3,9 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:flutter/foundation.dart';
-import 'package:image/image.dart' as img;
 
 import '../models/image_item.dart';
+import '../screens/save_image.dart';
 
 /// 图片拼接服务 - GPU Canvas + 原生 PNG 编码
 class ImageStitcherService {
@@ -43,13 +43,18 @@ class ImageStitcherService {
 
     // ========== Step 1: 异步解码 ==========
     log('开始解码 ${images.length} 张图片...');
-    onProgress?.call(0.01);
-    final futures = images.map((bytes) => _decodeImageFromBytes(bytes)).toList();
+    onProgress?.call(0.02);
+    final futures = images.asMap().entries.map((e) async {
+      final i = e.key;
+      final img = await _decodeImageFromBytes(e.value);
+      onProgress?.call(0.02 + 0.13 * ((i + 1) / images.length));
+      return img;
+    }).toList();
     final results = await Future.wait(futures);
     final decodedImages = results.whereType<ui.Image>().toList();
     if (decodedImages.isEmpty) throw Exception('无法解码任何图片');
     log('✅ 解码完成 (${decodedImages.length}张), 尺寸: ${decodedImages.map((e) => "${e.width}×${e.height}").join(', ')}');
-    onProgress?.call(0.18);
+    onProgress?.call(0.15);
 
     // ========== Step 2: 计算画布尺寸 ==========
     log('计算画布尺寸...');
@@ -110,11 +115,11 @@ class ImageStitcherService {
     }
     final pixelCount = (canvasWidth * canvasHeight / 1000000).toStringAsFixed(1);
     log('✅ 原始画布: ${canvasWidth}×${canvasHeight} ($pixelCount MP)');
-    onProgress?.call(0.24);
+    onProgress?.call(0.18);
 
     // 计算输出缩放比例
-    // 预览：限制最大边长加速渲染；保存：不缩放，保留原图画质
-    // Web 保存仅在超过 16383 时兜底（桌面 Chrome GPU 上限）
+    // 预览：限制最大边长加速渲染
+    // Web 保存：限制 8192px 防止 Dart PNG 编码超大缓冲区 (98MP→393MB→223s)
     double scale = 1.0;
     int outW = canvasWidth, outH = canvasHeight;
     if (maxPreviewDim > 0) {
@@ -228,7 +233,7 @@ class ImageStitcherService {
         scaledRect(dst.left, dst.top, dst.width, dst.height),
         ui.Paint()..filterQuality = ui.FilterQuality.medium,
       );
-      onProgress?.call(0.24 + 0.48 * ((i + 1) / decodedImages.length));
+      onProgress?.call(0.18 + 0.42 * ((i + 1) / decodedImages.length));
       src.dispose();
     }
 
@@ -236,13 +241,13 @@ class ImageStitcherService {
     final picture = recorder.endRecording();
 
     // ========== Step 4: GPU 渲染为 Image ==========
-    // Web: 超出 4090 时分块渲染，绕过 GPU 纹理上限
-    const int gpuLimit = 4090;
+    // Web: 超过 4096 时分块渲染绕过 GPU 纹理上限
+    const int gpuLimit = 4096;
     Uint8List outputBytes;
 
     if (kIsWeb && (drawW > gpuLimit || drawH > gpuLimit)) {
       log('🔲 Web分块渲染: ${drawW}×${drawH} (上限${gpuLimit}px)...');
-      onProgress?.call(0.74);
+      onProgress?.call(0.60);
       final fullRgba = Uint8List(drawW * drawH * 4);
       final tilesX = (drawW + gpuLimit - 1) ~/ gpuLimit;
       final tilesY = (drawH + gpuLimit - 1) ~/ gpuLimit;
@@ -277,30 +282,31 @@ class ImageStitcherService {
               }
             }
           }
-          onProgress?.call(0.74 + 0.12 * tileIdx / tileCount);
+          onProgress?.call(0.60 + 0.22 * tileIdx / tileCount);
         }
       }
 
-      log('PNG 编码中...');
-      onProgress?.call(0.88);
-      final png = img.Image.fromBytes(width: drawW, height: drawH, numChannels: 4, bytes: fullRgba.buffer, rowStride: drawW * 4);
-      outputBytes = Uint8List.fromList(img.encodePng(png));
-      log('✅ 分块渲染完成! 文件大小: ${(outputBytes.lengthInBytes / 1024).toStringAsFixed(1)} KB');
+      log('PNG 编码中 (浏览器原生)...');
+      onProgress?.call(0.82);
+      outputBytes = await encodeRgbaToPng(drawW, drawH, fullRgba);
+      log('✅ 分块渲染完成! 文件大小: ${(outputBytes.length / 1024).toStringAsFixed(1)} KB');
+      onProgress?.call(0.95);
     } else {
       log('GPU 渲染 toImage 中 (${drawW}×${drawH})...');
-      onProgress?.call(0.74);
+      onProgress?.call(0.60);
       ui.Image encodeImage = await picture.toImage(drawW, drawH);
       log('✅ 渲染完成: ${encodeImage.width}×${encodeImage.height}');
-      onProgress?.call(0.88);
+      onProgress?.call(0.75);
 
       final mp = (encodeImage.width * encodeImage.height / 1000000).toStringAsFixed(1);
       log('PNG 编码中 ($mp MP)...');
-      onProgress?.call(0.90);
+      onProgress?.call(0.82);
       final pngByteData = await encodeImage.toByteData(format: ui.ImageByteFormat.png);
       encodeImage.dispose();
       if (pngByteData == null) throw Exception('PNG编码失败');
       outputBytes = pngByteData.buffer.asUint8List(pngByteData.offsetInBytes, pngByteData.lengthInBytes);
       log('✅ PNG 导出完成! 文件大小: ${(outputBytes.length / 1024).toStringAsFixed(1)} KB');
+      onProgress?.call(0.95);
     }
 
     picture.dispose();

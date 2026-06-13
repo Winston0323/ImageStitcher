@@ -159,20 +159,22 @@ class _HomeScreenState extends State<HomeScreen> {
                 if (_saveProgress > 0)
                   Positioned.fill(
                     child: Container(
-                      color: Colors.black45,
+                      color: Colors.black54,
                       alignment: Alignment.center,
-                      child: Card(
-                        elevation: 6,
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                        child: Padding(padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 24), child: Column(mainAxisSize: MainAxisSize.min, children: [
-                          SizedBox(width: 48, height: 48, child: CircularProgressIndicator(strokeWidth: 3, value: _saveProgress)),
-                          const SizedBox(height: 16),
-                          Text('正在保存... ${(_saveProgress * 100).toInt()}%',
-                              style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14)),
-                          const SizedBox(height: 8),
-                          SizedBox(width: 120, child: LinearProgressIndicator(value: _saveProgress)),
-                        ])),
-                      ),
+                      child: Column(mainAxisSize: MainAxisSize.min, children: [
+                        SizedBox(
+                          width: 72, height: 72,
+                          child: Stack(
+                            fit: StackFit.expand,
+                            children: [
+                              CircularProgressIndicator(strokeWidth: 5, value: _saveProgress, color: Colors.white, backgroundColor: Colors.white24),
+                              Center(child: Text('${(_saveProgress * 100).toInt()}%', style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w700))),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        const Text('正在保存...', style: TextStyle(color: Colors.white70, fontSize: 13)),
+                      ]),
                     ),
                   ),
               ],
@@ -213,25 +215,22 @@ class _HomeScreenState extends State<HomeScreen> {
         if (_saveProgress > 0)
           Positioned.fill(
             child: Container(
-              color: Colors.black45,
+              color: Colors.black54,
               alignment: Alignment.center,
-              child: Card(
-                elevation: 6,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 24),
-                    child: Column(mainAxisSize: MainAxisSize.min, children: [
-                      SizedBox(
-                          width: 48,
-                          height: 48,
-                          child: CircularProgressIndicator(strokeWidth: 3, value: _saveProgress)),
-                      const SizedBox(height: 16),
-                      Text('正在保存... ${(_saveProgress * 100).toInt()}%',
-                          style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14)),
-                      const SizedBox(height: 8),
-                      SizedBox(width: 120, child: LinearProgressIndicator(value: _saveProgress)),
-                    ])),
-              ),
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                SizedBox(
+                  width: 72, height: 72,
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      CircularProgressIndicator(strokeWidth: 5, value: _saveProgress, color: Colors.white, backgroundColor: Colors.white24),
+                      Center(child: Text('${(_saveProgress * 100).toInt()}%', style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w700))),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 12),
+                const Text('正在保存...', style: TextStyle(color: Colors.white70, fontSize: 13)),
+              ]),
             ),
           ),
       ],
@@ -1421,7 +1420,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   void _startSaveTimer() {
     _stopSaveTimer();
-    _saveTimer = Timer.periodic(const Duration(milliseconds: 200), (_) {
+    _saveTimer = Timer.periodic(const Duration(milliseconds: 100), (_) {
       if (mounted && (_saveProgress > 0 || _isProcessing)) {
         setState(() {});
       } else {
@@ -1450,7 +1449,7 @@ class _HomeScreenState extends State<HomeScreen> {
       final fullResBytes = await ImageStitcherService.stitchImages(
         imageBytes,
         mode: _stitchMode,
-        onProgress: (p) => _saveProgress = p,
+        onProgress: (p) { _saveProgress = p; if (mounted) setState(() {}); },
         addBorder: _borderPercent > 0,
         borderColor: _borderUiColor,
         borderPercent: _borderPercent,
