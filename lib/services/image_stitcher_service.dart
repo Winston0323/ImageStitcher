@@ -117,9 +117,7 @@ class ImageStitcherService {
     log('✅ 原始画布: ${canvasWidth}×${canvasHeight} ($pixelCount MP)');
     onProgress?.call(0.18);
 
-    // 计算输出缩放比例
-    // 预览：限制最大边长加速渲染
-    // Web 保存：限制 8192px 防止 Dart PNG 编码超大缓冲区 (98MP→393MB→223s)
+    // 计算输出缩放比例（仅预览模式）
     double scale = 1.0;
     int outW = canvasWidth, outH = canvasHeight;
     if (maxPreviewDim > 0) {
@@ -129,15 +127,8 @@ class ImageStitcherService {
         outH = (canvasHeight * scale).round();
         log('📐 预览缩放: ${(scale*100).toStringAsFixed(0)}% → ${outW}×${outH}');
       }
-    } else if (kIsWeb) {
-      const int webSaveMax = 16383;
-      if (canvasWidth > webSaveMax || canvasHeight > webSaveMax) {
-        scale = webSaveMax / (canvasWidth > canvasHeight ? canvasWidth : canvasHeight).toDouble();
-        outW = (canvasWidth * scale).round();
-        outH = (canvasHeight * scale).round();
-        log('📐 Web保存缩放: ${(scale*100).toStringAsFixed(0)}% → ${outW}×${outH}');
-      }
     }
+    // 保存模式不缩放——走 Step 4 分块渲染突破 GPU 纹理上限
 
     // ========== Step 3: GPU Canvas 绘制 ==========
     log('GPU 绘制合成中...');
@@ -245,7 +236,7 @@ class ImageStitcherService {
     const int gpuLimit = 4096;
     Uint8List outputBytes;
 
-    if (kIsWeb && (drawW > gpuLimit || drawH > gpuLimit)) {
+    if (drawW > gpuLimit || drawH > gpuLimit) {
       log('🔲 Web分块渲染: ${drawW}×${drawH} (上限${gpuLimit}px)...');
       onProgress?.call(0.60);
       final fullRgba = Uint8List(drawW * drawH * 4);
