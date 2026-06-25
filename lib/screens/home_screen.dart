@@ -43,6 +43,9 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // 预览数据
   Uint8List? _previewBytes;
+  // 真正的输出尺寸（根据原图尺寸+边框计算，非预览缩放后的尺寸）
+  int? _outputWidth;
+  int? _outputHeight;
 
   @override
   Widget build(BuildContext context) {
@@ -80,6 +83,8 @@ class _HomeScreenState extends State<HomeScreen> {
               onPressed: () => setState(() {
                 _selectedImages.clear();
                 _previewBytes = null;
+                _outputWidth = null;
+                _outputHeight = null;
               }),
             ),
         ],
@@ -107,8 +112,18 @@ class _HomeScreenState extends State<HomeScreen> {
               children: [
                 const Icon(Icons.preview, size: 18, color: Colors.blue),
                 const SizedBox(width: 8),
-                Text('预览 (${_stitchMode == StitchMode.horizontal ? "水平" : "垂直"}拼接)',
-                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                Flexible(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('预览 (${_stitchMode == StitchMode.horizontal ? "水平" : "垂直"}拼接)',
+                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                      if (_outputWidth != null && _outputHeight != null)
+                        Text('$_outputWidth × $_outputHeight px',
+                            style: TextStyle(fontSize: 11, color: Colors.grey[600])),
+                    ],
+                  ),
+                ),
                 const Spacer(),
                 if (_isProcessing)
                   Padding(
@@ -277,7 +292,7 @@ class _HomeScreenState extends State<HomeScreen> {
       icon: Icons.add_photo_alternate_outlined,
       title: '选择图片',
       subtitle: _selectedImages.isEmpty ? '未添加' : '已添加 ${_selectedImages.length} 张',
-      onClear: _selectedImages.isNotEmpty ? () => setState(() { _selectedImages.clear(); _previewBytes = null; }) : null,
+      onClear: _selectedImages.isNotEmpty ? () => setState(() { _selectedImages.clear(); _previewBytes = null; _outputWidth = null; _outputHeight = null; }) : null,
       child: _buildImageContentWide(),
     );
   }
@@ -788,6 +803,20 @@ class _HomeScreenState extends State<HomeScreen> {
                       style: const TextStyle(fontSize: 10, color: Colors.white, fontWeight: FontWeight.bold)),
                 ),
               ),
+              // 尺寸标注
+              if (item.originalWidth != null && item.originalHeight != null)
+                Positioned(
+                  bottom: 2, right: 2,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 1),
+                    decoration: BoxDecoration(
+                      color: Colors.black54,
+                      borderRadius: BorderRadius.circular(3),
+                    ),
+                    child: Text('${item.originalWidth}×${item.originalHeight}',
+                        style: const TextStyle(fontSize: 8, color: Colors.white70)),
+                  ),
+                ),
               // 删除遮罩
               Positioned.fill(
                 child: Material(
@@ -927,6 +956,20 @@ class _HomeScreenState extends State<HomeScreen> {
                     style: const TextStyle(fontSize: 9, color: Colors.white, fontWeight: FontWeight.bold)),
               ),
             ),
+            // 尺寸标注
+            if (item.originalWidth != null && item.originalHeight != null)
+              Positioned(
+                bottom: 2, right: 2,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 1),
+                  decoration: BoxDecoration(
+                    color: Colors.black54,
+                    borderRadius: BorderRadius.circular(3),
+                  ),
+                  child: Text('${item.originalWidth}×${item.originalHeight}',
+                      style: const TextStyle(fontSize: 8, color: Colors.white70)),
+                ),
+              ),
             // 删除 X
             Positioned(
               top: 2, right: 2,
@@ -969,6 +1012,8 @@ class _HomeScreenState extends State<HomeScreen> {
       onTap: isEmpty ? null : () => setState(() {
         _selectedImages.clear();
         _previewBytes = null;
+        _outputWidth = null;
+        _outputHeight = null;
       }),
       child: Container(
         width: size,
@@ -1259,7 +1304,8 @@ class _HomeScreenState extends State<HomeScreen> {
                             ),
                             title: Text(item.name, overflow: TextOverflow.ellipsis, maxLines: 1,
                                 style: const TextStyle(fontSize: 13)),
-                            subtitle: Text('#${index + 1}',
+                            subtitle: Text(
+                              '#${index + 1}${item.originalWidth != null && item.originalHeight != null ? " · ${item.originalWidth}×${item.originalHeight}" : ""}',
                                 style: const TextStyle(fontSize: 11, color: Colors.blue, fontWeight: FontWeight.w600)),
                             trailing: IconButton(
                               iconSize: 18,
@@ -1379,6 +1425,16 @@ class _HomeScreenState extends State<HomeScreen> {
           }
         });
       }
+      // 如果还没有原始尺寸（如 file_picker 路径），解码原图获取
+      if (item.originalWidth == null || item.originalHeight == null) {
+        final origDims = await ImageStitcherService.getImageDimensions(item.bytes);
+        if (origDims != null && mounted) {
+          setState(() {
+            item.originalWidth = origDims.width;
+            item.originalHeight = origDims.height;
+          });
+        }
+      }
     } catch (_) {
       // 缩略图生成失败不影响主流程
     }
@@ -1393,9 +1449,11 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _autoPreview() async {
     if (_selectedImages.isEmpty) {
-      setState(() => _previewBytes = null);
+      setState(() { _previewBytes = null; _outputWidth = null; _outputHeight = null; });
       return;
     }
+    // 先同步计算输出尺寸（基于原始图片尺寸，非预览缩放）
+    _calculateOutputDimensions();
     setState(() { _isProcessing = true; });
     try {
       final imageBytes = await _getThumbnailBytes();
@@ -1415,6 +1473,47 @@ class _HomeScreenState extends State<HomeScreen> {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('预览生成失败: $e'), duration: const Duration(seconds: 5)));
     } finally {
       if (mounted) setState(() => _isProcessing = false);
+    }
+  }
+
+  /// 根据原始图片尺寸和边框设置，计算拼接后真正的输出尺寸（与 stitchImages 保存模式一致）
+  void _calculateOutputDimensions() {
+    // 需要所有图片都有原始尺寸
+    for (var item in _selectedImages) {
+      if (item.originalWidth == null || item.originalHeight == null) {
+        _outputWidth = null;
+        _outputHeight = null;
+        return;
+      }
+    }
+
+    final widths = _selectedImages.map((e) => e.originalWidth!).toList();
+    final heights = _selectedImages.map((e) => e.originalHeight!).toList();
+
+    int bw = 0;
+    if (_borderPercent > 0) {
+      final refDim = _stitchMode == StitchMode.horizontal
+          ? heights.reduce((a, b) => a > b ? a : b)
+          : widths.reduce((a, b) => a > b ? a : b);
+      bw = (refDim * _borderPercent / 100).round().clamp(1, 9999);
+    }
+
+    if (_stitchMode == StitchMode.horizontal) {
+      final maxH = heights.reduce((a, b) => a > b ? a : b);
+      int totalW = 0;
+      for (int i = 0; i < _selectedImages.length; i++) {
+        totalW += (widths[i] * maxH / heights[i]).round();
+      }
+      _outputWidth = totalW + bw * (_selectedImages.length + 1);
+      _outputHeight = maxH + 2 * bw;
+    } else {
+      final maxW = widths.reduce((a, b) => a > b ? a : b);
+      int totalH = 0;
+      for (int i = 0; i < _selectedImages.length; i++) {
+        totalH += (heights[i] * maxW / widths[i]).round();
+      }
+      _outputWidth = maxW + 2 * bw;
+      _outputHeight = totalH + bw * (_selectedImages.length + 1);
     }
   }
 
