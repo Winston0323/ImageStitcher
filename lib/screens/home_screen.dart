@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:io' show Platform, File;
+import 'dart:math' as math;
 import 'dart:typed_data';
+import 'dart:ui' as ui;
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:path_provider/path_provider.dart';
 import 'package:flutter/material.dart';
@@ -46,6 +48,7 @@ class _HomeScreenState extends State<HomeScreen> {
   // 真正的输出尺寸（根据原图尺寸+边框计算，非预览缩放后的尺寸）
   int? _outputWidth;
   int? _outputHeight;
+  bool _showRuler = true;
 
   @override
   Widget build(BuildContext context) {
@@ -97,105 +100,189 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Widget _buildPreviewPanel() {
     if (!kIsWeb && Platform.isAndroid) return _buildAndroidPreview();
-    return Card(
-      elevation: 4,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      clipBehavior: Clip.antiAlias,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          // 顶部工具栏
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-            color: Theme.of(context).colorScheme.primaryContainer.withValues(alpha: 0.5),
-            child: Row(
-              children: [
-                const Icon(Icons.preview, size: 18, color: Colors.blue),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        // 顶部工具栏（去卡片化）
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          decoration: BoxDecoration(
+            border: Border(bottom: BorderSide(color: Colors.grey.shade300, width: 0.5)),
+          ),
+          child: Row(
+            children: [
+              const Icon(Icons.preview, size: 16, color: Colors.grey),
+              const SizedBox(width: 6),
+              Text('${_stitchMode == StitchMode.horizontal ? "水平" : "垂直"}拼接',
+                  style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 12)),
+              if (_outputWidth != null && _outputHeight != null) ...[
                 const SizedBox(width: 8),
-                Flexible(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+                Text('$_outputWidth × $_outputHeight px',
+                    style: TextStyle(fontSize: 11, color: Colors.grey[500])),
+              ],
+              const Spacer(),
+              if (_outputWidth != null)
+                SizedBox(
+                  width: 28, height: 28,
+                  child: IconButton(
+                    visualDensity: VisualDensity.compact,
+                    padding: EdgeInsets.zero,
+                    icon: Icon(
+                      _showRuler ? Icons.straighten : Icons.straighten_outlined,
+                      size: 18,
+                      color: _showRuler ? Colors.blue : Colors.grey,
+                    ),
+                    tooltip: _showRuler ? '关闭标尺' : '显示标尺',
+                    onPressed: () => setState(() => _showRuler = !_showRuler),
+                  ),
+                ),
+              if (_isProcessing)
+                Padding(
+                  padding: const EdgeInsets.only(right: 6),
+                  child: SizedBox(
+                    width: 14, height: 14,
+                    child: CircularProgressIndicator(strokeWidth: 2, color: Colors.blue),
+                  ),
+                ),
+              SizedBox(
+                width: 28, height: 28,
+                child: IconButton(
+                  visualDensity: VisualDensity.compact,
+                  padding: EdgeInsets.zero,
+                  icon: const Icon(Icons.refresh, size: 18),
+                  tooltip: '刷新预览',
+                  onPressed: (_selectedImages.isNotEmpty && !_isProcessing) ? _autoPreview : null,
+                ),
+              ),
+            ],
+          ),
+        ),
+        // 内容区域
+        Expanded(
+          child: _buildPreviewContent(),
+        ),
+      ],
+    );
+  }
+
+  /// 预览内容区（图片 + 工程图标注 + 保存进度）
+  Widget _buildPreviewContent() {
+    // 标注线需要的额外空间
+    const extPad = 32.0;
+    return Stack(
+      alignment: Alignment.center,
+      children: [
+        // 图片或占位
+        if (_previewBytes != null && _outputWidth != null && _outputHeight != null)
+          InteractiveViewer(
+            minScale: 0.15,
+            maxScale: 8.0,
+            boundaryMargin: const EdgeInsets.all(40),
+            child: Center(
+              child: LayoutBuilder(
+                builder: (ctx, constraints) {
+                  final containerW = constraints.maxWidth;
+                  final containerH = constraints.maxHeight;
+                  if (containerW <= 0 || containerH <= 0) return _buildEmptyPreview();
+                  // 预留标注线空间
+                  final availW = containerW - extPad;
+                  final availH = containerH - extPad;
+                  final imgAspect = _outputWidth! / _outputHeight!;
+                  double dispW, dispH;
+                  if (availW / availH > imgAspect) {
+                    dispH = availH;
+                    dispW = dispH * imgAspect;
+                  } else {
+                    dispW = availW;
+                    dispH = dispW / imgAspect;
+                  }
+                  final left = (containerW - dispW) / 2;
+                  final top = (containerH - dispH) / 2;
+                  return SizedBox(
+                    width: containerW,
+                    height: containerH,
+                    child: Stack(
+                      clipBehavior: Clip.none,
+                      children: [
+                        // 图片
+                        Positioned(
+                          left: left, top: top,
+                          width: dispW, height: dispH,
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(2),
+                            child: Image.memory(_previewBytes!, fit: BoxFit.fill,
+                              errorBuilder: (_, __, ___) =>
+                                  const Icon(Icons.broken_image, size: 64, color: Colors.redAccent)),
+                          ),
+                        ),
+                        // 工程图样式标注 - 填满容器以确保有空间画延伸线
+                        if (_showRuler)
+                          Positioned.fill(
+                            child: IgnorePointer(
+                              child: CustomPaint(
+                                painter: _DimensionPainter(
+                                imageLeft: left, imageTop: top,
+                                imageWidth: dispW, imageHeight: dispH,
+                                displayWidth: _outputWidth!,
+                                displayHeight: _outputHeight!,
+                                strokeColor: Colors.white70,
+                                textColor: Colors.white,
+                                stitchMode: _stitchMode,
+                                originalDims: [
+                                  for (var item in _selectedImages)
+                                    if (item.originalWidth != null && item.originalHeight != null)
+                                      (width: item.originalWidth!, height: item.originalHeight!),
+                                ],
+                                borderPercent: _borderPercent,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+            ),
+          )
+        else
+          _buildEmptyPreview(),
+        // 保存进度覆盖层
+        if (_saveProgress > 0)
+          Positioned.fill(
+            child: Container(
+              color: Colors.black54,
+              alignment: Alignment.center,
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                SizedBox(
+                  width: 72, height: 72,
+                  child: Stack(
+                    fit: StackFit.expand,
                     children: [
-                      Text('预览 (${_stitchMode == StitchMode.horizontal ? "水平" : "垂直"}拼接)',
-                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
-                      if (_outputWidth != null && _outputHeight != null)
-                        Text('$_outputWidth × $_outputHeight px',
-                            style: TextStyle(fontSize: 11, color: Colors.grey[600])),
+                      CircularProgressIndicator(strokeWidth: 5, value: _saveProgress, color: Colors.white, backgroundColor: Colors.white24),
+                      Center(child: Text('${(_saveProgress * 100).toInt()}%', style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w700))),
                     ],
                   ),
                 ),
-                const Spacer(),
-                if (_isProcessing)
-                  Padding(
-                    padding: const EdgeInsets.only(right: 8),
-                    child: SizedBox(
-                      width: 16, height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.blue),
-                    ),
-                  ),
-                IconButton(visualDensity: VisualDensity.compact, icon: const Icon(Icons.refresh, size: 20), tooltip: '刷新预览', onPressed: (_selectedImages.isNotEmpty && !_isProcessing) ? _autoPreview : null),
-              ],
+                const SizedBox(height: 12),
+                const Text('正在保存...', style: TextStyle(color: Colors.white70, fontSize: 13)),
+              ]),
             ),
           ),
-          // 内容区域
-          Flexible(
-            child: Stack(
-              alignment: Alignment.center,
-              children: [
-                // 图片或占位
-                _previewBytes != null
-                    ? InteractiveViewer(
-                        minScale: 0.15,
-                        maxScale: 8.0,
-                        boundaryMargin: const EdgeInsets.all(16),
-                        child: Center(
-                          child: Container(
-                            color: Colors.grey[300],
-                            child: Image.memory(_previewBytes!, fit: BoxFit.contain,
-                              errorBuilder: (_, __, ___) => const Icon(Icons.broken_image, size: 64, color: Colors.redAccent)),
-                          ),
-                        ),
-                      )
-                    : Center(
-                        child: Container(
-                          color: Colors.grey[300],
-                          constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.65),
-                          child: Center(
-                            child: Column(mainAxisSize: MainAxisSize.min, children: [
-                              Icon(Icons.image_outlined, size: 64, color: Colors.grey[350]),
-                              const SizedBox(height: 12),
-                              Text('选择图片后\n将在此显示预览',
-                                  textAlign: TextAlign.center, style: TextStyle(fontSize: 14, color: Colors.grey[500], height: 1.5)),
-                            ]),
-                          ),
-                        ),
-                      ),
-                // 保存进度覆盖层
-                if (_saveProgress > 0)
-                  Positioned.fill(
-                    child: Container(
-                      color: Colors.black54,
-                      alignment: Alignment.center,
-                      child: Column(mainAxisSize: MainAxisSize.min, children: [
-                        SizedBox(
-                          width: 72, height: 72,
-                          child: Stack(
-                            fit: StackFit.expand,
-                            children: [
-                              CircularProgressIndicator(strokeWidth: 5, value: _saveProgress, color: Colors.white, backgroundColor: Colors.white24),
-                              Center(child: Text('${(_saveProgress * 100).toInt()}%', style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w700))),
-                            ],
-                          ),
-                        ),
-                        const SizedBox(height: 12),
-                        const Text('正在保存...', style: TextStyle(color: Colors.white70, fontSize: 13)),
-                      ]),
-                    ),
-                  ),
-              ],
-            ),
-          ),
-        ],
+      ],
+    );
+  }
+
+  Widget _buildEmptyPreview() {
+    return Container(
+      color: Colors.grey.shade100,
+      child: Center(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Icon(Icons.image_outlined, size: 48, color: Colors.grey[350]),
+          const SizedBox(height: 12),
+          Text('选择图片后\n将在此显示预览',
+              textAlign: TextAlign.center, style: TextStyle(fontSize: 14, color: Colors.grey[400], height: 1.5)),
+        ]),
       ),
     );
   }
@@ -1651,5 +1738,299 @@ class _HomeScreenState extends State<HomeScreen> {
       result.add(item.thumbnailBytes!);
     }
     return result;
+  }
+}
+
+/// 工程图风格的尺寸标注 Painter
+/// 在图片四周绘制标注线、箭头和尺寸文字
+class _DimensionPainter extends CustomPainter {
+  final double imageLeft, imageTop, imageWidth, imageHeight;
+  final int displayWidth, displayHeight;
+  final Color strokeColor;
+  final Color textColor;
+  final StitchMode stitchMode;
+  final List<({int width, int height})> originalDims;
+  final double borderPercent;
+
+  _DimensionPainter({
+    required this.imageLeft,
+    required this.imageTop,
+    required this.imageWidth,
+    required this.imageHeight,
+    required this.displayWidth,
+    required this.displayHeight,
+    required this.strokeColor,
+    required this.textColor,
+    required this.stitchMode,
+    required this.originalDims,
+    required this.borderPercent,
+  });
+
+  static const double _extensionGap = 12;  // 延伸线与图片边缘的间距
+  static const double _extendLength = 18;  // 延伸线伸出长度
+  static const double _arrowSize = 7;       // 箭头大小
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = strokeColor
+      ..strokeWidth = 1.2
+      ..style = PaintingStyle.stroke;
+
+    final imgLeft = imageLeft;
+    final imgTop = imageTop;
+    final imgRight = imageLeft + imageWidth;
+    final imgBottom = imageTop + imageHeight;
+    final scaleX = imageWidth / displayWidth;
+    final scaleY = imageHeight / displayHeight;
+
+    // ---------- 计算每张子图的显示区域 ----------
+    final subRects = _computeSubRects(scaleX, scaleY, imgLeft, imgTop);
+
+    // ---------- 总体标注：底部宽度 ----------
+    final hExtLeft = imgLeft + _extensionGap;
+    final hExtRight = imgRight - _extensionGap;
+    final hLineY = imgBottom + _extendLength + 6;
+    canvas.drawLine(Offset(imgLeft, imgBottom), Offset(imgLeft, hLineY), paint);
+    canvas.drawLine(Offset(imgRight, imgBottom), Offset(imgRight, hLineY), paint);
+    canvas.drawLine(Offset(hExtLeft, hLineY), Offset(hExtRight, hLineY), paint);
+    _drawArrow(canvas, Offset(hExtLeft, hLineY), -1, paint);
+    _drawArrow(canvas, Offset(hExtRight, hLineY), 1, paint);
+    _drawDimText(canvas, '${displayWidth}px',
+        Offset((hExtLeft + hExtRight) / 2, hLineY - 7),
+        TextAlign.center);
+
+    // ---------- 总体标注：右侧高度 ----------
+    final vExtTop = imgTop + _extensionGap;
+    final vExtBottom = imgBottom - _extensionGap;
+    final vLineX = imgRight + _extendLength + 6;
+    canvas.drawLine(Offset(imgRight, imgTop), Offset(vLineX, imgTop), paint);
+    canvas.drawLine(Offset(imgRight, imgBottom), Offset(vLineX, imgBottom), paint);
+    canvas.drawLine(Offset(vLineX, vExtTop), Offset(vLineX, vExtBottom), paint);
+    _drawArrow(canvas, Offset(vLineX, vExtTop), -2, paint);
+    _drawArrow(canvas, Offset(vLineX, vExtBottom), 2, paint);
+    _drawDimText(canvas, '${displayHeight}px',
+        Offset(vLineX + 7, (imgTop + imgBottom) / 2),
+        TextAlign.left, rotate: false);
+
+    // ---------- 每张图的独立标注：上边（宽度）+ 边框 ----------
+    if (subRects.length > 1) {
+      final perPaint = Paint()
+        ..color = strokeColor.withValues(alpha: 0.45)
+        ..strokeWidth = 0.8
+        ..style = PaintingStyle.stroke;
+      final borderPaint = Paint()
+        ..color = strokeColor.withValues(alpha: 0.3)
+        ..strokeWidth = 0.5
+        ..style = PaintingStyle.stroke;
+      final topLineY = imgTop - _extendLength - 2;
+
+      for (int i = 0; i < subRects.length; i++) {
+        final r = subRects[i];
+        final midX = r.left + r.width / 2;
+        canvas.drawLine(Offset(midX, imgTop), Offset(midX, imgTop - 8), perPaint);
+        _drawDimTextSmall(canvas, '${originalDims[i].width}',
+            Offset(midX, topLineY), TextAlign.center);
+
+        // 边框标注：每张图之间的间隙
+        if (i < subRects.length - 1) {
+          final gapLeft = r.right;
+          final gapRight = subRects[i + 1].left;
+          if (gapRight > gapLeft) {
+            final gapMid = (gapLeft + gapRight) / 2;
+            canvas.drawLine(Offset(gapLeft, imgTop), Offset(gapLeft, imgTop - 5), borderPaint);
+            canvas.drawLine(Offset(gapRight, imgTop), Offset(gapRight, imgTop - 5), borderPaint);
+            final bwPx = stitchMode == StitchMode.horizontal
+                ? ((gapRight - gapLeft) / scaleX).round()
+                : ((gapRight - gapLeft) / scaleY).round();
+            _drawDimTextTiny(canvas, '↔$bwPx',
+                Offset(gapMid, topLineY), TextAlign.center);
+          }
+        }
+      }
+
+      // ---------- 每张图的独立标注：左边（高度）+ 边框 ----------
+      final leftLineX = imgLeft - _extendLength - 2;
+
+      for (int i = 0; i < subRects.length; i++) {
+        final r = subRects[i];
+        final midY = r.top + r.height / 2;
+        canvas.drawLine(Offset(imgLeft, midY), Offset(imgLeft - 8, midY), perPaint);
+        _drawDimTextSmall(canvas, '${originalDims[i].height}',
+            Offset(leftLineX, midY + 1), TextAlign.right);
+
+        // 边框标注：每张图之间的间隙
+        if (i < subRects.length - 1) {
+          final gapTop = r.bottom;
+          final gapBottom = subRects[i + 1].top;
+          if (gapBottom > gapTop) {
+            final gapMid = (gapTop + gapBottom) / 2;
+            canvas.drawLine(Offset(imgLeft, gapTop), Offset(imgLeft - 5, gapTop), borderPaint);
+            canvas.drawLine(Offset(imgLeft, gapBottom), Offset(imgLeft - 5, gapBottom), borderPaint);
+            final bwPx = ((gapBottom - gapTop) / (stitchMode == StitchMode.horizontal ? scaleY : scaleX)).round();
+            _drawDimTextTiny(canvas, '↕$bwPx',
+                Offset(leftLineX - 14, gapMid), TextAlign.right);
+          }
+        }
+      }
+    }
+  }
+
+  /// 计算每张子图在显示屏上的矩形区域（含边框间距）
+  List<ui.Rect> _computeSubRects(double scaleX, double scaleY,
+      double offsetX, double offsetY) {
+    if (originalDims.isEmpty) return [];
+    final rects = <ui.Rect>[];
+    final n = originalDims.length;
+    final widths = originalDims.map((e) => e.width).toList();
+    final heights = originalDims.map((e) => e.height).toList();
+
+    int bw = 0; // border width in output pixels
+    if (borderPercent > 0) {
+      final refDim = stitchMode == StitchMode.horizontal
+          ? heights.reduce((a, b) => a > b ? a : b)
+          : widths.reduce((a, b) => a > b ? a : b);
+      bw = (refDim * borderPercent / 100).round().clamp(1, 9999);
+    }
+    final bwDispX = bw * scaleX;
+    final bwDispY = bw * scaleY;
+
+    if (stitchMode == StitchMode.horizontal) {
+      final maxH = heights.reduce((a, b) => a > b ? a : b);
+      double x = offsetX + bwDispX;
+      for (int i = 0; i < n; i++) {
+        final wDisp = (widths[i] * maxH / heights[i]) * scaleX;
+        rects.add(ui.Rect.fromLTWH(x, offsetY + bwDispY, wDisp, maxH * scaleY));
+        x += wDisp + bwDispX;
+      }
+    } else {
+      final maxW = widths.reduce((a, b) => a > b ? a : b);
+      double y = offsetY + bwDispY;
+      for (int i = 0; i < n; i++) {
+        final hDisp = (heights[i] * maxW / widths[i]) * scaleY;
+        rects.add(ui.Rect.fromLTWH(offsetX + bwDispX, y, maxW * scaleX, hDisp));
+        y += hDisp + bwDispY;
+      }
+    }
+    return rects;
+  }
+
+  void _drawArrow(Canvas canvas, Offset tip, int direction, Paint paint) {
+    // direction: -1=left, 1=right, -2=up, 2=down
+    double dx1, dy1, dx2, dy2;
+    if (direction == -1) {
+      dx1 = _arrowSize; dy1 = -_arrowSize / 2; dx2 = _arrowSize; dy2 = _arrowSize / 2;
+    } else if (direction == 1) {
+      dx1 = -_arrowSize; dy1 = -_arrowSize / 2; dx2 = -_arrowSize; dy2 = _arrowSize / 2;
+    } else if (direction == -2) {
+      dx1 = -_arrowSize / 2; dy1 = _arrowSize; dx2 = _arrowSize / 2; dy2 = _arrowSize;
+    } else {
+      dx1 = -_arrowSize / 2; dy1 = -_arrowSize; dx2 = _arrowSize / 2; dy2 = -_arrowSize;
+    }
+    final fillPaint = Paint()
+      ..color = strokeColor
+      ..style = PaintingStyle.fill;
+    final path = Path()
+      ..moveTo(tip.dx, tip.dy)
+      ..lineTo(tip.dx + dx1, tip.dy + dy1)
+      ..lineTo(tip.dx + dx2, tip.dy + dy2)
+      ..close();
+    canvas.drawPath(path, fillPaint);
+  }
+
+  void _drawDimText(Canvas canvas, String text, Offset center,
+      TextAlign align, {bool rotate = false}) {
+    final tp = TextPainter(
+      text: TextSpan(
+        text: text,
+        style: TextStyle(
+          color: textColor,
+          fontSize: 11,
+          fontWeight: FontWeight.w600,
+          fontFamily: 'monospace',
+        ),
+      ),
+      textAlign: align,
+      textDirection: ui.TextDirection.ltr,
+    )..layout(maxWidth: 300);
+
+    if (rotate) {
+      canvas.save();
+      canvas.translate(center.dx, center.dy);
+      canvas.rotate(-math.pi / 2);
+      tp.paint(canvas, Offset(-tp.width / 2, -tp.height / 2));
+      canvas.restore();
+    } else {
+      tp.paint(canvas, Offset(center.dx - tp.width / 2, center.dy - tp.height));
+    }
+  }
+
+  /// 小号文字（每张图的独立标注）
+  void _drawDimTextSmall(Canvas canvas, String text, Offset center,
+      TextAlign align) {
+    final tp = TextPainter(
+      text: TextSpan(
+        text: text,
+        style: TextStyle(
+          color: textColor.withValues(alpha: 0.6),
+          fontSize: 9,
+          fontWeight: FontWeight.w500,
+          fontFamily: 'monospace',
+        ),
+      ),
+      textAlign: align,
+      textDirection: ui.TextDirection.ltr,
+    )..layout(maxWidth: 200);
+
+    // 半透明背景
+    final bgPaint = Paint()
+      ..color = const ui.Color(0x33000000)
+      ..style = PaintingStyle.fill;
+    final bgRect = ui.Rect.fromCenter(
+      center: center, width: tp.width + 6, height: tp.height + 2,
+    );
+    canvas.drawRRect(
+      ui.RRect.fromRectAndRadius(bgRect, const Radius.circular(3)),
+      bgPaint,
+    );
+
+    final paintX = align == TextAlign.right
+        ? center.dx - tp.width - 3
+        : center.dx - tp.width / 2;
+    tp.paint(canvas, Offset(paintX, center.dy - tp.height / 2));
+  }
+
+  /// 极小文字（边框宽度标注）
+  void _drawDimTextTiny(Canvas canvas, String text, Offset center,
+      TextAlign align) {
+    final tp = TextPainter(
+      text: TextSpan(
+        text: text,
+        style: TextStyle(
+          color: textColor.withValues(alpha: 0.45),
+          fontSize: 8,
+          fontWeight: FontWeight.w400,
+          fontFamily: 'monospace',
+        ),
+      ),
+      textAlign: align,
+      textDirection: ui.TextDirection.ltr,
+    )..layout(maxWidth: 160);
+
+    final paintX = align == TextAlign.right
+        ? center.dx - tp.width
+        : center.dx - tp.width / 2;
+    tp.paint(canvas, Offset(paintX, center.dy - tp.height / 2));
+  }
+
+  @override
+  bool shouldRepaint(covariant _DimensionPainter oldDelegate) {
+    return imageLeft != oldDelegate.imageLeft ||
+        imageTop != oldDelegate.imageTop ||
+        imageWidth != oldDelegate.imageWidth ||
+        imageHeight != oldDelegate.imageHeight ||
+        displayWidth != oldDelegate.displayWidth ||
+        displayHeight != oldDelegate.displayHeight ||
+        stitchMode != oldDelegate.stitchMode;
   }
 }
