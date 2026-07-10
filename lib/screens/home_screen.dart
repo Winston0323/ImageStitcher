@@ -65,6 +65,16 @@ class _HomeScreenState extends State<HomeScreen> {
   Offset _dragTotalDelta = Offset.zero;
   // 选中子图的源/显示像素比（用于拖拽转换）
   double _selectedSrcToDispRatio = 1.0;
+  // 触屏模式 + 多指手势
+  bool _isTouchMode = false;
+  final Map<int, Offset> _activePointers = {};
+  double? _pinchStartDist;
+  double _pinchStartScale = 1.0;
+  // 选中子图的显示矩形（用于触屏 hit-test）
+  ui.Rect? _selectedSubRect;
+  // 大图手动平移
+  Offset? _viewPanLastPos;
+  final TransformationController _viewController = TransformationController();
   // 实时预览：缓存解码后的缩略图 ui.Image
   List<ui.Image?> _decodedThumbs = [];
 
@@ -208,8 +218,9 @@ class _HomeScreenState extends State<HomeScreen> {
         // 图片或占位
         if (_canLivePreview && _outputWidth != null && _outputHeight != null)
           InteractiveViewer(
-            panEnabled: _selectedSubImageIndex == null,
-            scaleEnabled: _selectedSubImageIndex == null,
+            transformationController: _viewController,
+            panEnabled: !(_isTouchMode && _selectedSubImageIndex != null),
+            scaleEnabled: !(_isTouchMode && _selectedSubImageIndex != null),
             minScale: 0.15,
             maxScale: 8.0,
             boundaryMargin: const EdgeInsets.all(40),
@@ -239,8 +250,9 @@ class _HomeScreenState extends State<HomeScreen> {
                   final subRects = _buildSubRects(
                     left, top, displayScaleX, displayScaleY,
                   );
-                  // 计算选中子图的源/显示像素比（供拖拽转换用）
+                  // 计算选中子图的源/显示像素比（供拖拽转换用）+ 存储子图矩形
                   if (_selectedSubImageIndex != null && _selectedSubImageIndex! < subRects.length) {
+                    _selectedSubRect = subRects[_selectedSubImageIndex!];
                     final item = _selectedImages[_selectedSubImageIndex!];
                     if (item.originalWidth != null) {
                       final s = _scaleOf(_selectedSubImageIndex!);
@@ -265,22 +277,76 @@ class _HomeScreenState extends State<HomeScreen> {
                           width: dispW, height: dispH,
                           child: Listener(
                             onPointerDown: (e) {
-                              if (_selectedSubImageIndex != null && _panPointerId == null) {
-                                _panPointerId = e.pointer;
-                                _panLastPos = e.localPosition;
+                              if (e.kind != ui.PointerDeviceKind.touch) return;
+                              if (!_isTouchMode) setState(() => _isTouchMode = true);
+                              _activePointers[e.pointer] = e.localPosition;
+                              if (_selectedSubImageIndex != null && _activePointers.length == 2) {
+                                // 开始双指缩放子图
+                                final pts = _activePointers.values.toList();
+                                _pinchStartDist = (pts[0] - pts[1]).distance;
+                                _pinchStartScale = _scaleOf(_selectedSubImageIndex!);
+                                _panPointerId = null; // 取消单指拖拽
+                              } else if (_selectedSubImageIndex != null && _activePointers.length == 1) {
+                                // 单指：判断是否在子图内
+                                if (_selectedSubRect != null && _selectedSubRect!.contains(e.localPosition)) {
+                                  _panPointerId = e.pointer;
+                                  _panLastPos = e.localPosition;
+                                } else {
+                                  // 在子图外 → 平移大图
+                                  _viewPanLastPos = e.localPosition;
+                                }
                               }
                             },
                             onPointerMove: (e) {
-                              if (_selectedSubImageIndex == null || _panLastPos == null || e.pointer != _panPointerId) return;
-                              final delta = e.localPosition - _panLastPos!;
-                              _panLastPos = e.localPosition;
-                              _onImagePanDelta(delta);
+                              if (e.kind != ui.PointerDeviceKind.touch) return;
+                              if (!_activePointers.containsKey(e.pointer)) return;
+                              _activePointers[e.pointer] = e.localPosition;
+                              if (_selectedSubImageIndex != null && _activePointers.length >= 2 && _pinchStartDist != null) {
+                                // 双指缩放子图
+                                final pts = _activePointers.values.toList();
+                                final dist = (pts[0] - pts[1]).distance;
+                                final factor = dist / _pinchStartDist!;
+                                final newScale = (_pinchStartScale * factor).clamp(1.0, 3.0);
+                                final idx = _selectedSubImageIndex!;
+                                final cur = _scaleOf(idx);
+                                if ((newScale - cur).abs() > 0.002) {
+                                  setState(() {
+                                    while (_imageScales.length <= idx) _imageScales.add(1.0);
+                                    _imageScales[idx] = double.parse(newScale.toStringAsFixed(2));
+                                  });
+                                  _calculateOutputDimensions();
+                                }
+                              } else if (e.pointer == _panPointerId && _panLastPos != null) {
+                                // 单指拖拽子图
+                                final delta = e.localPosition - _panLastPos!;
+                                _panLastPos = e.localPosition;
+                                _onImagePanDelta(delta);
+                              } else if (_viewPanLastPos != null && e.pointer == _activePointers.keys.first) {
+                                // 单指平移大图
+                                final delta = e.localPosition - _viewPanLastPos!;
+                                _viewPanLastPos = e.localPosition;
+                                final matrix = _viewController.value.clone();
+                                matrix.translate(delta.dx, delta.dy, 0);
+                                _viewController.value = matrix;
+                              }
                             },
                             onPointerUp: (e) {
+                              if (e.kind != ui.PointerDeviceKind.touch) return;
+                              _activePointers.remove(e.pointer);
                               if (e.pointer == _panPointerId) { _panPointerId = null; _panLastPos = null; }
+                              if (_activePointers.isEmpty) {
+                                _pinchStartDist = null;
+                                _viewPanLastPos = null;
+                              }
                             },
                             onPointerCancel: (e) {
+                              if (e.kind != ui.PointerDeviceKind.touch) return;
+                              _activePointers.remove(e.pointer);
                               if (e.pointer == _panPointerId) { _panPointerId = null; _panLastPos = null; }
+                              if (_activePointers.isEmpty) {
+                                _pinchStartDist = null;
+                                _viewPanLastPos = null;
+                              }
                             },
                             child: ClipRRect(
                             borderRadius: BorderRadius.circular(2),
@@ -330,9 +396,10 @@ class _HomeScreenState extends State<HomeScreen> {
                             ),
                           ),
                         ),
-                        // 选中子图的四个角点拖拽手柄
+                        // 选中子图的四个角点拖拽手柄（触屏模式下隐藏，用双指缩放）
                         if (_selectedSubImageIndex != null &&
-                            _selectedSubImageIndex! < subRects.length)
+                            _selectedSubImageIndex! < subRects.length &&
+                            !_isTouchMode)
                           ..._buildCornerHandles(
                               subRects[_selectedSubImageIndex!]),
                       ],
@@ -1797,7 +1864,7 @@ class _HomeScreenState extends State<HomeScreen> {
       }
     }
     // 点到空白区域 → 取消选中
-    setState(() => _selectedSubImageIndex = null);
+    setState(() { _selectedSubImageIndex = null; _selectedSubRect = null; });
   }
 
   /// 角点拖拽开始：记录初始状态
@@ -1929,6 +1996,7 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void dispose() {
     _stopSaveTimer();
+    _viewController.dispose();
     super.dispose();
   }
 
