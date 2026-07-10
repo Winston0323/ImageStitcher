@@ -44,7 +44,7 @@ class _HomeScreenState extends State<HomeScreen> {
   double _borderPercent = 0.0;
 
   // 预览数据
-  Uint8List? _previewBytes;
+  // （GPU 实时预览，不再需要 _previewBytes）
   // 真正的输出尺寸（根据原图尺寸+边框计算，非预览缩放后的尺寸）
   int? _outputWidth;
   int? _outputHeight;
@@ -54,10 +54,30 @@ class _HomeScreenState extends State<HomeScreen> {
   int? _selectedSubImageIndex;
   // 每张图的缩放因子 (1.0=100%, 3.0=300%)
   List<double> _imageScales = [];
-  Timer? _previewDebounce;
+  // 每张图的平移偏移（源像素，0,0=居中）
+  List<Offset> _imageOffsets = [];
+  // 图片拖拽平移：上一次指针位置
+  Offset? _panLastPos;
+  // 角点拖拽状态
+  int _dragCornerIndex = 0;
+  double _dragStartScale = 1.0;
+  Offset _dragTotalDelta = Offset.zero;
+  // 选中子图的源/显示像素比（用于拖拽转换）
+  double _selectedSrcToDispRatio = 1.0;
+  // 实时预览：缓存解码后的缩略图 ui.Image
+  List<ui.Image?> _decodedThumbs = [];
 
   double _scaleOf(int index) =>
       index < _imageScales.length ? _imageScales[index] : 1.0;
+
+  Offset _offsetOf(int index) =>
+      index < _imageOffsets.length ? _imageOffsets[index] : Offset.zero;
+
+  /// 所有缩略图都已解码，可以实时预览
+  bool get _canLivePreview =>
+      _selectedImages.isNotEmpty &&
+      _decodedThumbs.length >= _selectedImages.length &&
+      _decodedThumbs.every((e) => e != null);
 
   @override
   Widget build(BuildContext context) {
@@ -82,7 +102,7 @@ class _HomeScreenState extends State<HomeScreen> {
       appBar: AppBar(
         title: const Text('图片拼接工具'),
         actions: [
-          if (_previewBytes != null && !_isProcessing)
+          if (_selectedImages.isNotEmpty && !_isProcessing)
             IconButton(
               icon: const Icon(Icons.save_alt),
               tooltip: '保存图片',
@@ -95,8 +115,9 @@ class _HomeScreenState extends State<HomeScreen> {
               onPressed: () => setState(() {
                 _selectedImages.clear();
                 _imageScales.clear();
+                _decodedThumbs.clear();
+                _imageOffsets.clear();
                 _selectedSubImageIndex = null;
-                _previewBytes = null;
                 _outputWidth = null;
                 _outputHeight = null;
               }),
@@ -184,8 +205,9 @@ class _HomeScreenState extends State<HomeScreen> {
       alignment: Alignment.center,
       children: [
         // 图片或占位
-        if (_previewBytes != null && _outputWidth != null && _outputHeight != null)
+        if (_canLivePreview && _outputWidth != null && _outputHeight != null)
           InteractiveViewer(
+            panEnabled: _selectedSubImageIndex == null,
             minScale: 0.15,
             maxScale: 8.0,
             boundaryMargin: const EdgeInsets.all(40),
@@ -215,6 +237,16 @@ class _HomeScreenState extends State<HomeScreen> {
                   final subRects = _buildSubRects(
                     left, top, displayScaleX, displayScaleY,
                   );
+                  // 计算选中子图的源/显示像素比（供拖拽转换用）
+                  if (_selectedSubImageIndex != null && _selectedSubImageIndex! < subRects.length) {
+                    final item = _selectedImages[_selectedSubImageIndex!];
+                    if (item.originalWidth != null) {
+                      final s = _scaleOf(_selectedSubImageIndex!);
+                      final cropW = item.originalWidth! / s;
+                      final dispW_i = subRects[_selectedSubImageIndex!].width;
+                      _selectedSrcToDispRatio = dispW_i > 0 ? cropW / dispW_i : 1.0;
+                    }
+                  }
 
                   return GestureDetector(
                     behavior: HitTestBehavior.opaque,
@@ -225,15 +257,43 @@ class _HomeScreenState extends State<HomeScreen> {
                     child: Stack(
                       clipBehavior: Clip.none,
                       children: [
-                        // 图片
+                        // 图片（Listener 实现拖拽平移，绕过手势竞争）
                         Positioned(
                           left: left, top: top,
                           width: dispW, height: dispH,
-                          child: ClipRRect(
+                          child: Listener(
+                            onPointerDown: (e) {
+                              if (_selectedSubImageIndex != null) _panLastPos = e.localPosition;
+                            },
+                            onPointerMove: (e) {
+                              if (_selectedSubImageIndex == null || _panLastPos == null) return;
+                              final delta = e.localPosition - _panLastPos!;
+                              _panLastPos = e.localPosition;
+                              _onImagePanDelta(delta);
+                            },
+                            onPointerUp: (_) => _panLastPos = null,
+                            onPointerCancel: (_) => _panLastPos = null,
+                            child: ClipRRect(
                             borderRadius: BorderRadius.circular(2),
-                            child: Image.memory(_previewBytes!, fit: BoxFit.fill,
-                              errorBuilder: (_, __, ___) =>
-                                  const Icon(Icons.broken_image, size: 64, color: Colors.redAccent)),
+                            child: CustomPaint(
+                              size: Size(dispW, dispH),
+                              painter: _LivePreviewPainter(
+                                images: [for (var e in _decodedThumbs) e!],
+                                mode: _stitchMode,
+                                scales: _imageScales,
+                                offsets: _imageOffsets,
+                                originalDims: [
+                                  for (var item in _selectedImages)
+                                    if (item.originalWidth != null && item.originalHeight != null)
+                                      (width: item.originalWidth!, height: item.originalHeight!),
+                                ],
+                                addBorder: _borderPercent > 0,
+                                borderColor: _borderUiColor,
+                                borderPercent: _borderPercent,
+                                rainbowBorder: _isRainbowBorder,
+                              ),
+                            ),
+                          ),
                           ),
                         ),
                         // 工程图样式标注 - 填满容器以确保有空间画延伸线
@@ -321,16 +381,40 @@ class _HomeScreenState extends State<HomeScreen> {
     return Stack(
       alignment: Alignment.center,
       children: [
-        _previewBytes != null
+        _canLivePreview
             ? InteractiveViewer(
                 minScale: 0.15,
                 maxScale: 8.0,
                 boundaryMargin: const EdgeInsets.all(16),
                 child: Center(
-                  child: Image.memory(_previewBytes!,
-                      fit: BoxFit.contain,
-                      errorBuilder: (_, __, ___) =>
-                          const Icon(Icons.broken_image, size: 64, color: Colors.redAccent)),
+                  child: LayoutBuilder(
+                    builder: (ctx, constraints) {
+                      if (constraints.maxWidth <= 0 || constraints.maxHeight <= 0) {
+                        return const SizedBox.shrink();
+                      }
+                      return SizedBox(
+                        width: constraints.maxWidth,
+                        height: constraints.maxHeight,
+                        child: CustomPaint(
+                          painter: _LivePreviewPainter(
+                            images: [for (var e in _decodedThumbs) e!],
+                            mode: _stitchMode,
+                            scales: _imageScales,
+                            offsets: _imageOffsets,
+                            originalDims: [
+                              for (var item in _selectedImages)
+                                if (item.originalWidth != null && item.originalHeight != null)
+                                  (width: item.originalWidth!, height: item.originalHeight!),
+                            ],
+                            addBorder: _borderPercent > 0,
+                            borderColor: _borderUiColor,
+                            borderPercent: _borderPercent,
+                            rainbowBorder: _isRainbowBorder,
+                          ),
+                        ),
+                      );
+                    },
+                  ),
                 ),
               )
             : Center(
@@ -408,7 +492,7 @@ class _HomeScreenState extends State<HomeScreen> {
       icon: Icons.add_photo_alternate_outlined,
       title: '选择图片',
       subtitle: _selectedImages.isEmpty ? '未添加' : '已添加 ${_selectedImages.length} 张',
-      onClear: _selectedImages.isNotEmpty ? () => setState(() { _selectedImages.clear(); _imageScales.clear(); _selectedSubImageIndex = null; _previewBytes = null; _outputWidth = null; _outputHeight = null; }) : null,
+      onClear: _selectedImages.isNotEmpty ? () => setState(() { _selectedImages.clear(); _imageScales.clear(); _decodedThumbs.clear(); _imageOffsets.clear(); _selectedSubImageIndex = null; _outputWidth = null; _outputHeight = null; }) : null,
       child: _buildImageContentWide(),
     );
   }
@@ -834,8 +918,12 @@ class _HomeScreenState extends State<HomeScreen> {
                     if (newIndex > oldIndex) newIndex--;
                     final item = _selectedImages.removeAt(oldIndex);
                     final scale = _imageScales.length > oldIndex ? _imageScales.removeAt(oldIndex) : 1.0;
+                    final thumb = _decodedThumbs.length > oldIndex ? _decodedThumbs.removeAt(oldIndex) : null;
+                    final offset = _imageOffsets.length > oldIndex ? _imageOffsets.removeAt(oldIndex) : Offset.zero;
                     _selectedImages.insert(newIndex, item);
                     _imageScales.insert(newIndex, scale);
+                    _decodedThumbs.insert(newIndex, thumb);
+                    _imageOffsets.insert(newIndex, offset);
                   });
                   _autoPreview();
                 },
@@ -889,6 +977,8 @@ class _HomeScreenState extends State<HomeScreen> {
           onTap: () => setState(() {
             _selectedImages.removeAt(index);
             _imageScales.removeAt(index);
+            _decodedThumbs.removeAt(index);
+            _imageOffsets.removeAt(index);
             _autoPreview();
           }),
           child: Stack(
@@ -944,6 +1034,8 @@ class _HomeScreenState extends State<HomeScreen> {
                     onTap: () => setState(() {
                       _selectedImages.removeAt(index);
                       _imageScales.removeAt(index);
+                      _decodedThumbs.removeAt(index);
+                      _imageOffsets.removeAt(index);
                       _autoPreview();
                     }),
                     child: const Align(
@@ -1047,6 +1139,8 @@ class _HomeScreenState extends State<HomeScreen> {
       onTap: () => setState(() {
         _selectedImages.removeAt(index);
         _imageScales.removeAt(index);
+        _decodedThumbs.removeAt(index);
+        _imageOffsets.removeAt(index);
         _autoPreview();
       }),
       child: Container(
@@ -1133,8 +1227,9 @@ class _HomeScreenState extends State<HomeScreen> {
       onTap: isEmpty ? null : () => setState(() {
         _selectedImages.clear();
         _imageScales.clear();
+        _decodedThumbs.clear();
+        _imageOffsets.clear();
         _selectedSubImageIndex = null;
-        _previewBytes = null;
         _outputWidth = null;
         _outputHeight = null;
       }),
@@ -1402,7 +1497,7 @@ class _HomeScreenState extends State<HomeScreen> {
                           key: ValueKey('sheet_${item.path}'),
                           direction: DismissDirection.endToStart,
                           onDismissed: (_) {
-                            setState(() { _selectedImages.removeAt(index); _imageScales.removeAt(index); });
+                            setState(() { _selectedImages.removeAt(index); _imageScales.removeAt(index); _decodedThumbs.removeAt(index); _imageOffsets.removeAt(index); });
                             setSheetState(() {});
                             _autoPreview();
                           },
@@ -1434,7 +1529,7 @@ class _HomeScreenState extends State<HomeScreen> {
                               iconSize: 18,
                               icon: const Icon(Icons.remove_circle_outline, color: Colors.redAccent),
                               onPressed: () {
-                                setState(() { _selectedImages.removeAt(index); _imageScales.removeAt(index); });
+                                setState(() { _selectedImages.removeAt(index); _imageScales.removeAt(index); _decodedThumbs.removeAt(index); _imageOffsets.removeAt(index); });
                                 setSheetState(() {});
                                 _autoPreview();
                               },
@@ -1486,7 +1581,7 @@ class _HomeScreenState extends State<HomeScreen> {
             originalWidth: picked.width,
             originalHeight: picked.height,
           );
-          setState(() { _selectedImages.add(item); _imageScales.add(1.0); });
+          setState(() { _selectedImages.add(item); _imageScales.add(1.0); _decodedThumbs.add(null); _imageOffsets.add(Offset.zero); });
           tasks.add(_generateThumbnail(item));
         }
         if (mounted) ScaffoldMessenger.of(context).showSnackBar(
@@ -1522,7 +1617,7 @@ class _HomeScreenState extends State<HomeScreen> {
             path: file.name,
             name: file.name,
           );
-          setState(() { _selectedImages.add(item); _imageScales.add(1.0); });
+          setState(() { _selectedImages.add(item); _imageScales.add(1.0); _decodedThumbs.add(null); _imageOffsets.add(Offset.zero); });
           tasks.add(_generateThumbnail(item));
         }
         if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('已添加 ${result.files.length} 张图片'), duration: const Duration(seconds: 1)));
@@ -1537,14 +1632,24 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _generateThumbnail(ImageItem item) async {
     try {
       final thumb = await ImageStitcherService.createThumbnail(item.bytes, percent: 10);
-      // 解码缩略图获取尺寸
+      // 解码缩略图获取尺寸 + 缓存 ui.Image 供实时预览用
       final dims = await ImageStitcherService.getImageDimensions(thumb);
+      final decoded = await _decodeUiImage(thumb);
+      final idx = _selectedImages.indexOf(item);
       if (mounted) {
         setState(() {
           item.thumbnailBytes = thumb;
           if (dims != null) {
             item.thumbWidth = dims.width.toDouble();
             item.thumbHeight = dims.height.toDouble();
+          }
+          if (decoded != null && idx >= 0) {
+            while (_decodedThumbs.length <= idx) _decodedThumbs.add(null);
+            if (idx < _decodedThumbs.length) {
+              _decodedThumbs[idx] = decoded;
+            } else {
+              _decodedThumbs.add(decoded);
+            }
           }
         });
       }
@@ -1570,43 +1675,14 @@ class _HomeScreenState extends State<HomeScreen> {
   }
   bool get _isRainbowBorder => _borderColorIndex == 2;
 
-  Future<void> _autoPreview() async {
+  /// 预览更新：GPU 实时绘制，只需同步计算尺寸 + 触发重绘
+  void _autoPreview() {
     if (_selectedImages.isEmpty) {
-      setState(() { _previewBytes = null; _outputWidth = null; _outputHeight = null; _selectedSubImageIndex = null; });
+      setState(() { _outputWidth = null; _outputHeight = null; _selectedSubImageIndex = null; });
       return;
     }
-    // 先同步计算输出尺寸（基于原始图片尺寸，非预览缩放）
     _calculateOutputDimensions();
-    setState(() { _isProcessing = true; });
-    try {
-      final imageBytes = await _getThumbnailBytes();
-      if (imageBytes == null) return; // 缩略图还没生成完，跳过
-      // 根据每张图的缩放因子预缩放
-      final scaledBytes = <Uint8List>[];
-      for (int i = 0; i < imageBytes.length; i++) {
-        final s = _scaleOf(i);
-        if ((s - 1.0).abs() < 0.01) {
-          scaledBytes.add(imageBytes[i]);
-        } else {
-          scaledBytes.add(await ImageStitcherService.resizeImage(imageBytes[i], s));
-        }
-      }
-      final stitchedBytes = await ImageStitcherService.stitchImages(
-        scaledBytes,
-        mode: _stitchMode,
-        maxPreviewDim: 2048, // 预览缩放到最大边长2048，编码快10-50倍
-        addBorder: _borderPercent > 0,
-        borderColor: _borderUiColor,
-        borderPercent: _borderPercent,
-        rainbowBorder: _isRainbowBorder,
-      );
-      if (mounted) setState(() => _previewBytes = stitchedBytes);
-    } catch (e) {
-      // 失败也保留旧预览（如果有），不清空，但显示错误
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('预览生成失败: $e'), duration: const Duration(seconds: 5)));
-    } finally {
-      if (mounted) setState(() => _isProcessing = false);
-    }
+    setState(() {}); // 触发 _LivePreviewPainter 重绘
   }
 
   /// 根据原始图片尺寸和边框设置，计算拼接后真正的输出尺寸（与 stitchImages 保存模式一致）
@@ -1635,7 +1711,7 @@ class _HomeScreenState extends State<HomeScreen> {
       final maxH = heights.reduce((a, b) => a > b ? a : b);
       int totalW = 0;
       for (int i = 0; i < _selectedImages.length; i++) {
-        totalW += (widths[i] * maxH / heights[i] * _scaleOf(i)).round();
+        totalW += (widths[i] * maxH / heights[i]).round();
       }
       _outputWidth = totalW + bw * (_selectedImages.length + 1);
       _outputHeight = maxH + 2 * bw;
@@ -1643,11 +1719,18 @@ class _HomeScreenState extends State<HomeScreen> {
       final maxW = widths.reduce((a, b) => a > b ? a : b);
       int totalH = 0;
       for (int i = 0; i < _selectedImages.length; i++) {
-        totalH += (heights[i] * maxW / widths[i] * _scaleOf(i)).round();
+        totalH += (heights[i] * maxW / widths[i]).round();
       }
       _outputWidth = maxW + 2 * bw;
       _outputHeight = totalH + bw * (_selectedImages.length + 1);
     }
+  }
+
+  /// 解码 bytes 为 ui.Image（供实时预览用）
+  Future<ui.Image?> _decodeUiImage(Uint8List bytes) async {
+    final completer = Completer<ui.Image?>();
+    ui.decodeImageFromList(bytes, (img) => completer.complete(img));
+    return completer.future;
   }
 
   /// 计算每张子图在大预览中的显示矩形（用于点击检测）
@@ -1678,7 +1761,7 @@ class _HomeScreenState extends State<HomeScreen> {
       final maxH = heights.reduce((a, b) => a > b ? a : b);
       double x = offsetX + bwDispX;
       for (int i = 0; i < n; i++) {
-        final wDisp = (widths[i] * maxH / heights[i] * _scaleOf(i)) * scaleX;
+        final wDisp = (widths[i] * maxH / heights[i]) * scaleX;
         rects.add(ui.Rect.fromLTWH(x, offsetY + bwDispY, wDisp, maxH * scaleY));
         x += wDisp + bwDispX;
       }
@@ -1686,7 +1769,7 @@ class _HomeScreenState extends State<HomeScreen> {
       final maxW = widths.reduce((a, b) => a > b ? a : b);
       double y = offsetY + bwDispY;
       for (int i = 0; i < n; i++) {
-        final hDisp = (heights[i] * maxW / widths[i] * _scaleOf(i)) * scaleY;
+        final hDisp = (heights[i] * maxW / widths[i]) * scaleY;
         rects.add(ui.Rect.fromLTWH(offsetX + bwDispX, y, maxW * scaleX, hDisp));
         y += hDisp + bwDispY;
       }
@@ -1708,38 +1791,69 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() => _selectedSubImageIndex = null);
   }
 
-  /// 角点拖拽：实时更新 UI（标尺+手柄），延迟渲染预览图
+  /// 角点拖拽开始：记录初始状态
+  void _onCornerDragStart(DragStartDetails details, int cornerIndex) {
+    _dragCornerIndex = cornerIndex;
+    _dragStartScale = _scaleOf(_selectedSubImageIndex ?? 0);
+    _dragTotalDelta = Offset.zero;
+  }
+
+  /// 角点拖拽：沿中心缩放，比例不变
   void _onCornerDrag(DragUpdateDetails details) {
     if (_selectedSubImageIndex == null) return;
     final idx = _selectedSubImageIndex!;
+    _dragTotalDelta += details.delta;
+
+    // 四个角的外向方向（向外拖 = 放大）
+    // 0=左上(-1,-1)  1=右上(+1,-1)  2=左下(-1,+1)  3=右下(+1,+1)
+    const signs = [
+      (-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0),
+    ];
+    final (sx, sy) = signs[_dragCornerIndex];
+    // 将累计 delta 投影到外向对角线方向
+    final outward = (_dragTotalDelta.dx * sx + _dragTotalDelta.dy * sy) / math.sqrt2;
+    final change = outward / 200; // 200px 拖拽 ≈ 100% 缩放
+    final newScale = (_dragStartScale + change).clamp(1.0, 3.0);
     final current = _scaleOf(idx);
-    final delta = _stitchMode == StitchMode.horizontal
-        ? details.delta.dx
-        : details.delta.dy;
-    final change = delta / 400;
-    final newScale = (current + change).clamp(1.0, 3.0);
     if ((newScale - current).abs() > 0.002) {
       setState(() {
         while (_imageScales.length <= idx) _imageScales.add(1.0);
         _imageScales[idx] = double.parse(newScale.toStringAsFixed(2));
       });
-      _calculateOutputDimensions(); // 同步更新标尺
-      _debouncePreview();           // 延迟重新渲染预览图
+      _calculateOutputDimensions();
     }
   }
 
-  /// 拖拽结束：立即渲染最终的预览图
-  void _onCornerDragEnd(DragEndDetails details) {
-    _previewDebounce?.cancel();
-    _autoPreview();
-  }
+  /// 拖拽结束：GPU 实时预览已同步，无需额外处理
+  void _onCornerDragEnd(DragEndDetails details) {}
 
-  /// 防抖预览：100ms 内无新拖拽才触发重渲染
-  void _debouncePreview() {
-    _previewDebounce?.cancel();
-    _previewDebounce = Timer(const Duration(milliseconds: 100), () {
-      if (mounted) _autoPreview();
-    });
+  /// 选中子图拖拽：平移裁剪中心，限制在图片范围内
+  void _onImagePanDelta(Offset displayDelta) {
+    if (_selectedSubImageIndex == null) return;
+    final idx = _selectedSubImageIndex!;
+    final item = _selectedImages[idx];
+    if (item.originalWidth == null || item.originalHeight == null) return;
+
+    final s = _scaleOf(idx);
+    if (s <= 1.0) return; // 未缩放时无法平移
+    // 显示 delta → 源像素 delta（取反：向右拖图片向右移 = 裁剪中心向左移）
+    final srcDelta = -displayDelta * _selectedSrcToDispRatio;
+    while (_imageOffsets.length <= idx) _imageOffsets.add(Offset.zero);
+    var newOffset = _imageOffsets[idx] + srcDelta;
+
+    // 限制在图片范围内（裁剪区域不超出原图边界）
+    final cropW = item.originalWidth! / s;
+    final cropH = item.originalHeight! / s;
+    final maxX = (item.originalWidth! - cropW) / 2;
+    final maxY = (item.originalHeight! - cropH) / 2;
+    newOffset = Offset(
+      newOffset.dx.clamp(-maxX, maxX),
+      newOffset.dy.clamp(-maxY, maxY),
+    );
+
+    if (newOffset != _imageOffsets[idx]) {
+      setState(() => _imageOffsets[idx] = newOffset);
+    }
   }
 
   /// 构建四个角点拖拽手柄
@@ -1766,6 +1880,7 @@ class _HomeScreenState extends State<HomeScreen> {
         height: size,
         child: GestureDetector(
           behavior: HitTestBehavior.opaque,
+          onPanStart: (d) => _onCornerDragStart(d, i),
           onPanUpdate: _onCornerDrag,
           onPanEnd: _onCornerDragEnd,
           child: MouseRegion(
@@ -1805,7 +1920,6 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void dispose() {
     _stopSaveTimer();
-    _previewDebounce?.cancel();
     super.dispose();
   }
 
@@ -1815,24 +1929,16 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() { _isProcessing = true; _saveProgress = 0.0; });
     try {
       final imageBytes = await _getSelectedImageBytes();
-      // 根据每张图的缩放因子预缩放
-      final scaledBytes = <Uint8List>[];
-      for (int i = 0; i < imageBytes.length; i++) {
-        final s = _scaleOf(i);
-        if ((s - 1.0).abs() < 0.01) {
-          scaledBytes.add(imageBytes[i]);
-        } else {
-          scaledBytes.add(await ImageStitcherService.resizeImage(imageBytes[i], s));
-        }
-      }
       final fullResBytes = await ImageStitcherService.stitchImages(
-        scaledBytes,
+        imageBytes,
         mode: _stitchMode,
         onProgress: (p) { _saveProgress = p; if (mounted) setState(() {}); },
         addBorder: _borderPercent > 0,
         borderColor: _borderUiColor,
         borderPercent: _borderPercent,
         rainbowBorder: _isRainbowBorder,
+        scales: _imageScales,
+        offsets: _imageOffsets,
       );
       if (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) {
         await _saveToDeviceAlbum(fullResBytes);
@@ -1888,7 +1994,7 @@ class _HomeScreenState extends State<HomeScreen> {
   void _reorderImages() {
     final reordered = List<ImageItem>.from(_selectedImages);
     showDialog(context: context, builder: (ctx) => AlertDialog(title: const Row(children: [Icon(Icons.sort, size: 20), SizedBox(width: 8), Text('调整图片顺序')]), content: SizedBox(width: double.maxFinite, height: 320,     child: ReorderableListView.builder(shrinkWrap: true, itemCount: reordered.length, onReorder: (oldIndex, newIndex) {
-      setState(() { if (newIndex > oldIndex) newIndex--; final item = reordered.removeAt(oldIndex); reordered.insert(newIndex, item); _selectedImages.clear(); _imageScales.clear(); _selectedImages.addAll(reordered); for (int i = 0; i < _selectedImages.length; i++) _imageScales.add(1.0); }); _autoPreview();
+      setState(() { if (newIndex > oldIndex) newIndex--; final item = reordered.removeAt(oldIndex); reordered.insert(newIndex, item); _selectedImages.clear(); _imageScales.clear(); _decodedThumbs.clear(); _imageOffsets.clear(); _selectedImages.addAll(reordered); for (int i = 0; i < _selectedImages.length; i++) { _imageScales.add(1.0); _imageOffsets.add(Offset.zero); } }); _autoPreview();
     }, itemBuilder: (ctx, index) {
       final item = reordered[index];
       return ListTile(key: ValueKey(item.path), dense: true, contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2), leading: CircleAvatar(radius: 14, backgroundColor: Theme.of(ctx).colorScheme.primary, foregroundColor: Colors.white, child: Text('${index + 1}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold))), title: Text(item.name, overflow: TextOverflow.ellipsis, maxLines: 1, style: const TextStyle(fontSize: 13)), trailing: const Icon(Icons.drag_handle, color: Colors.grey, size: 20));
@@ -1923,16 +2029,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<List<Uint8List>> _getSelectedImageBytes() async => [for (var item in _selectedImages) item.bytes];
 
-  /// 获取所有图片的缩略图字节，如果任意缩略图尚未生成则返回 null
-  Future<List<Uint8List>?> _getThumbnailBytes() async {
-    final result = <Uint8List>[];
-    for (var item in _selectedImages) {
-      if (item.thumbnailBytes == null) return null; // 缩略图还没生成
-      result.add(item.thumbnailBytes!);
-    }
-    return result;
-  }
 }
+
 
 /// 工程图风格的尺寸标注 Painter
 /// 在图片四周绘制标注线、箭头和尺寸文字
@@ -2122,8 +2220,7 @@ class _DimensionPainter extends CustomPainter {
       final maxH = heights.reduce((a, b) => a > b ? a : b);
       double x = offsetX + bwDispX;
       for (int i = 0; i < n; i++) {
-        final s = i < imageScales.length ? imageScales[i] : 1.0;
-        final wDisp = (widths[i] * maxH / heights[i] * s) * scaleX;
+        final wDisp = (widths[i] * maxH / heights[i]) * scaleX;
         rects.add(ui.Rect.fromLTWH(x, offsetY + bwDispY, wDisp, maxH * scaleY));
         x += wDisp + bwDispX;
       }
@@ -2131,8 +2228,7 @@ class _DimensionPainter extends CustomPainter {
       final maxW = widths.reduce((a, b) => a > b ? a : b);
       double y = offsetY + bwDispY;
       for (int i = 0; i < n; i++) {
-        final s = i < imageScales.length ? imageScales[i] : 1.0;
-        final hDisp = (heights[i] * maxW / widths[i] * s) * scaleY;
+        final hDisp = (heights[i] * maxW / widths[i]) * scaleY;
         rects.add(ui.Rect.fromLTWH(offsetX + bwDispX, y, maxW * scaleX, hDisp));
         y += hDisp + bwDispY;
       }
@@ -2259,4 +2355,152 @@ class _DimensionPainter extends CustomPainter {
         stitchMode != oldDelegate.stitchMode ||
         selectedIndex != oldDelegate.selectedIndex;
   }
+}
+
+/// 实时预览 Painter：拖拽时直接用 GPU 画布绘制，跳过 PNG 编解码
+class _LivePreviewPainter extends CustomPainter {
+  final List<ui.Image> images;
+  final StitchMode mode;
+  final List<double> scales;
+  final List<Offset> offsets;
+  final List<({int width, int height})> originalDims;
+  final bool addBorder;
+  final ui.Color borderColor;
+  final double borderPercent;
+  final bool rainbowBorder;
+
+  _LivePreviewPainter({
+    required this.images,
+    required this.mode,
+    required this.scales,
+    required this.offsets,
+    required this.originalDims,
+    required this.addBorder,
+    required this.borderColor,
+    required this.borderPercent,
+    required this.rainbowBorder,
+  });
+
+  /// 计算源裁剪区域（scale>1 时取中心 1/s 区域，offset 偏移裁剪中心）
+  /// offset 以原图像素存储，需转换为缩略图像素
+  ui.Rect _computeSrcRect(ui.Image src, double s, Offset offset, int origW, int origH) {
+    if (s <= 1.0) {
+      return ui.Rect.fromLTWH(0, 0, src.width.toDouble(), src.height.toDouble());
+    }
+    // 原图像素 → 缩略图像素
+    final sx = src.width / origW;
+    final sy = src.height / origH;
+    final thumbOffset = Offset(offset.dx * sx, offset.dy * sy);
+    final cw = src.width / s;
+    final ch = src.height / s;
+    final cx = src.width / 2 + thumbOffset.dx;
+    final cy = src.height / 2 + thumbOffset.dy;
+    return ui.Rect.fromLTWH(
+      (cx - cw / 2).clamp(0.0, src.width - cw),
+      (cy - ch / 2).clamp(0.0, src.height - ch),
+      cw, ch,
+    );
+  }
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (images.isEmpty) return;
+
+    // 计算画布尺寸（与 stitchImages 一致，但不含 scale 对框的影响）
+    int maxHeight = images.map((e) => e.height).reduce((a, b) => a > b ? a : b);
+    int maxWidth = images.map((e) => e.width).reduce((a, b) => a > b ? a : b);
+    int bw = 0;
+    if (addBorder) {
+      final ref = mode == StitchMode.horizontal ? maxHeight : maxWidth;
+      bw = (ref * borderPercent / 100).round().clamp(1, 9999);
+    }
+
+    // 计算 dstRects + srcRects
+    final dstRects = <ui.Rect>[];
+    final srcRects = <ui.Rect>[];
+    int canvasW, canvasH;
+
+    if (mode == StitchMode.horizontal) {
+      int totalW = 0;
+      for (int i = 0; i < images.length; i++) {
+        final src = images[i];
+        final s = i < scales.length ? scales[i] : 1.0;
+        final w = (src.width * maxHeight / src.height).round();
+        dstRects.add(ui.Rect.fromLTWH(totalW.toDouble(), 0, w.toDouble(), maxHeight.toDouble()));
+        final origW = i < originalDims.length ? originalDims[i].width : src.width;
+        final origH = i < originalDims.length ? originalDims[i].height : src.height;
+        srcRects.add(_computeSrcRect(src, s, i < offsets.length ? offsets[i] : Offset.zero, origW, origH));
+        totalW += w;
+      }
+      canvasW = totalW + bw * (images.length + 1);
+      canvasH = maxHeight + 2 * bw;
+      if (addBorder) {
+        double ox = bw.toDouble();
+        for (int i = 0; i < dstRects.length; i++) {
+          dstRects[i] = ui.Rect.fromLTWH(ox, bw.toDouble(), dstRects[i].width, dstRects[i].height);
+          ox += dstRects[i].width + bw;
+        }
+      }
+    } else {
+      int totalH = 0;
+      for (int i = 0; i < images.length; i++) {
+        final src = images[i];
+        final s = i < scales.length ? scales[i] : 1.0;
+        final h = (src.height * maxWidth / src.width).round();
+        dstRects.add(ui.Rect.fromLTWH(0, totalH.toDouble(), maxWidth.toDouble(), h.toDouble()));
+        final origW2 = i < originalDims.length ? originalDims[i].width : src.width;
+        final origH2 = i < originalDims.length ? originalDims[i].height : src.height;
+        srcRects.add(_computeSrcRect(src, s, i < offsets.length ? offsets[i] : Offset.zero, origW2, origH2));
+        totalH += h;
+      }
+      canvasW = maxWidth + 2 * bw;
+      canvasH = totalH + bw * (images.length + 1);
+      if (addBorder) {
+        double oy = bw.toDouble();
+        for (int i = 0; i < dstRects.length; i++) {
+          dstRects[i] = ui.Rect.fromLTWH(bw.toDouble(), oy, dstRects[i].width, dstRects[i].height);
+          oy += dstRects[i].height + bw;
+        }
+      }
+    }
+
+    // 缩放到画布显示区域（BoxFit.contain）
+    final scaleX = size.width / canvasW;
+    final scaleY = size.height / canvasH;
+    final scale = scaleX < scaleY ? scaleX : scaleY;
+    final dispW = canvasW * scale;
+    final dispH = canvasH * scale;
+    final offX = (size.width - dispW) / 2;
+    final offY = (size.height - dispH) / 2;
+
+    canvas.save();
+    canvas.translate(offX, offY);
+    canvas.scale(scale);
+
+    // 白色背景
+    canvas.drawRect(
+      ui.Rect.fromLTWH(0, 0, canvasW.toDouble(), canvasH.toDouble()),
+      ui.Paint()..color = const ui.Color(0xFFFFFFFF),
+    );
+
+    // 边框 + 图片
+    for (int i = 0; i < images.length; i++) {
+      final dst = dstRects[i];
+      if (addBorder) {
+        final br = ui.Rect.fromLTWH(dst.left - bw, dst.top - bw, dst.width + 2 * bw, dst.height + 2 * bw);
+        canvas.drawRect(br, ui.Paint()..color = borderColor);
+      }
+      canvas.drawImageRect(
+        images[i],
+        srcRects[i],
+        dst,
+        ui.Paint()..filterQuality = ui.FilterQuality.medium,
+      );
+    }
+
+    canvas.restore();
+  }
+
+  @override
+  bool shouldRepaint(covariant _LivePreviewPainter oldDelegate) => true;
 }

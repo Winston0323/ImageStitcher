@@ -26,6 +26,8 @@ class ImageStitcherService {
     ui.Color borderColor = const ui.Color(0xFF000000),
     double borderPercent = 3.0,
     bool rainbowBorder = false,
+    List<double>? scales,  // 每张图的缩放因子 (1.0=100%, 默认 1.0)
+    List<ui.Offset>? offsets, // 每张图的平移偏移（源像素，默认 0,0）
   }) async {
     if (images.isEmpty) throw Exception('没有可拼接的图片');
     if (images.length == 1 && !addBorder) return images.first;
@@ -61,6 +63,27 @@ class ImageStitcherService {
     int canvasWidth, canvasHeight;
     List<ui.Rect> dstRects;
     int bw = 0;
+
+    // 计算每张图的源裁剪区域（scale>1 时取中心 1/s 区域，offset 偏移裁剪中心）
+    final srcRects = <ui.Rect>[];
+    for (int i = 0; i < decodedImages.length; i++) {
+      final src = decodedImages[i];
+      final s = scales != null && i < scales.length ? scales[i] : 1.0;
+      final off = offsets != null && i < offsets.length ? offsets[i] : ui.Offset.zero;
+      if (s <= 1.0) {
+        srcRects.add(ui.Rect.fromLTWH(0, 0, src.width.toDouble(), src.height.toDouble()));
+      } else {
+        final cropW = src.width / s;
+        final cropH = src.height / s;
+        final cx = src.width / 2 + off.dx;
+        final cy = src.height / 2 + off.dy;
+        srcRects.add(ui.Rect.fromLTWH(
+          (cx - cropW / 2).clamp(0.0, src.width - cropW),
+          (cy - cropH / 2).clamp(0.0, src.height - cropH),
+          cropW, cropH,
+        ));
+      }
+    }
 
     if (mode == StitchMode.horizontal) {
       int maxHeight = decodedImages.map((e) => e.height).reduce((a, b) => a > b ? a : b);
@@ -220,7 +243,7 @@ class ImageStitcherService {
 
       canvas.drawImageRect(
         src,
-        ui.Rect.fromLTWH(0, 0, src.width.toDouble(), src.height.toDouble()),
+        srcRects[i],
         scaledRect(dst.left, dst.top, dst.width, dst.height),
         ui.Paint()..filterQuality = ui.FilterQuality.medium,
       );
