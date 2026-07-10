@@ -482,6 +482,31 @@ class ImageStitcherService {
     return byteData.buffer.asUint8List();
   }
 
+  /// 按线性缩放因子缩放图片（保持宽高比）
+  /// [scale] 线性缩放比例，1.0=原尺寸，2.0=两倍
+  static Future<Uint8List> resizeImage(Uint8List bytes, double scale) async {
+    final image = await _decodeImageFromBytes(bytes);
+    if (image == null) throw Exception('缩放解码失败');
+    final dstW = (image.width * scale).round();
+    final dstH = (image.height * scale).round();
+    final recorder = ui.PictureRecorder();
+    final canvas = ui.Canvas(recorder);
+    canvas.drawImageRect(
+      image,
+      ui.Rect.fromLTWH(0, 0, image.width.toDouble(), image.height.toDouble()),
+      ui.Rect.fromLTWH(0, 0, dstW.toDouble(), dstH.toDouble()),
+      ui.Paint()..filterQuality = ui.FilterQuality.high,
+    );
+    image.dispose();
+    final picture = recorder.endRecording();
+    final result = await picture.toImage(dstW, dstH);
+    picture.dispose();
+    final byteData = await result.toByteData(format: ui.ImageByteFormat.png);
+    result.dispose();
+    if (byteData == null) throw Exception('缩放编码失败');
+    return byteData.buffer.asUint8List();
+  }
+
   /// 获取图片尺寸（不解码全图，只读取头部）
   static Future<({int width, int height})?> getImageDimensions(Uint8List bytes) async {
     final image = await _decodeImageFromBytes(bytes);

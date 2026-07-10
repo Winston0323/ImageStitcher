@@ -50,6 +50,15 @@ class _HomeScreenState extends State<HomeScreen> {
   int? _outputHeight;
   bool _showRuler = true;
 
+  // 大预览图点选 + 角点拖拽缩放
+  int? _selectedSubImageIndex;
+  // 每张图的缩放因子 (1.0=100%, 3.0=300%)
+  List<double> _imageScales = [];
+  Timer? _previewDebounce;
+
+  double _scaleOf(int index) =>
+      index < _imageScales.length ? _imageScales[index] : 1.0;
+
   @override
   Widget build(BuildContext context) {
     final isWide = MediaQuery.of(context).size.width >= 600;
@@ -85,6 +94,8 @@ class _HomeScreenState extends State<HomeScreen> {
               tooltip: '清空列表',
               onPressed: () => setState(() {
                 _selectedImages.clear();
+                _imageScales.clear();
+                _selectedSubImageIndex = null;
                 _previewBytes = null;
                 _outputWidth = null;
                 _outputHeight = null;
@@ -198,7 +209,17 @@ class _HomeScreenState extends State<HomeScreen> {
                   }
                   final left = (containerW - dispW) / 2;
                   final top = (containerH - dispH) / 2;
-                  return SizedBox(
+                  // 计算子图区域（用于点击检测和选中高亮）
+                  final displayScaleX = dispW / _outputWidth!;
+                  final displayScaleY = dispH / _outputHeight!;
+                  final subRects = _buildSubRects(
+                    left, top, displayScaleX, displayScaleY,
+                  );
+
+                  return GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTapDown: (d) => _onPreviewTap(d.localPosition, subRects),
+                    child: SizedBox(
                     width: containerW,
                     height: containerH,
                     child: Stack(
@@ -234,11 +255,19 @@ class _HomeScreenState extends State<HomeScreen> {
                                       (width: item.originalWidth!, height: item.originalHeight!),
                                 ],
                                 borderPercent: _borderPercent,
+                                selectedIndex: _selectedSubImageIndex,
+                                imageScales: _imageScales,
                               ),
                             ),
                           ),
                         ),
+                        // 选中子图的四个角点拖拽手柄
+                        if (_selectedSubImageIndex != null &&
+                            _selectedSubImageIndex! < subRects.length)
+                          ..._buildCornerHandles(
+                              subRects[_selectedSubImageIndex!]),
                       ],
+                    ),
                     ),
                   );
                 },
@@ -379,7 +408,7 @@ class _HomeScreenState extends State<HomeScreen> {
       icon: Icons.add_photo_alternate_outlined,
       title: '选择图片',
       subtitle: _selectedImages.isEmpty ? '未添加' : '已添加 ${_selectedImages.length} 张',
-      onClear: _selectedImages.isNotEmpty ? () => setState(() { _selectedImages.clear(); _previewBytes = null; _outputWidth = null; _outputHeight = null; }) : null,
+      onClear: _selectedImages.isNotEmpty ? () => setState(() { _selectedImages.clear(); _imageScales.clear(); _selectedSubImageIndex = null; _previewBytes = null; _outputWidth = null; _outputHeight = null; }) : null,
       child: _buildImageContentWide(),
     );
   }
@@ -804,7 +833,9 @@ class _HomeScreenState extends State<HomeScreen> {
                   setState(() {
                     if (newIndex > oldIndex) newIndex--;
                     final item = _selectedImages.removeAt(oldIndex);
+                    final scale = _imageScales.length > oldIndex ? _imageScales.removeAt(oldIndex) : 1.0;
                     _selectedImages.insert(newIndex, item);
+                    _imageScales.insert(newIndex, scale);
                   });
                   _autoPreview();
                 },
@@ -857,6 +888,7 @@ class _HomeScreenState extends State<HomeScreen> {
         child: InkWell(
           onTap: () => setState(() {
             _selectedImages.removeAt(index);
+            _imageScales.removeAt(index);
             _autoPreview();
           }),
           child: Stack(
@@ -911,6 +943,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   child: InkWell(
                     onTap: () => setState(() {
                       _selectedImages.removeAt(index);
+                      _imageScales.removeAt(index);
                       _autoPreview();
                     }),
                     child: const Align(
@@ -1013,6 +1046,7 @@ class _HomeScreenState extends State<HomeScreen> {
     return GestureDetector(
       onTap: () => setState(() {
         _selectedImages.removeAt(index);
+        _imageScales.removeAt(index);
         _autoPreview();
       }),
       child: Container(
@@ -1098,6 +1132,8 @@ class _HomeScreenState extends State<HomeScreen> {
     return GestureDetector(
       onTap: isEmpty ? null : () => setState(() {
         _selectedImages.clear();
+        _imageScales.clear();
+        _selectedSubImageIndex = null;
         _previewBytes = null;
         _outputWidth = null;
         _outputHeight = null;
@@ -1366,7 +1402,7 @@ class _HomeScreenState extends State<HomeScreen> {
                           key: ValueKey('sheet_${item.path}'),
                           direction: DismissDirection.endToStart,
                           onDismissed: (_) {
-                            setState(() => _selectedImages.removeAt(index));
+                            setState(() { _selectedImages.removeAt(index); _imageScales.removeAt(index); });
                             setSheetState(() {});
                             _autoPreview();
                           },
@@ -1398,7 +1434,7 @@ class _HomeScreenState extends State<HomeScreen> {
                               iconSize: 18,
                               icon: const Icon(Icons.remove_circle_outline, color: Colors.redAccent),
                               onPressed: () {
-                                setState(() => _selectedImages.removeAt(index));
+                                setState(() { _selectedImages.removeAt(index); _imageScales.removeAt(index); });
                                 setSheetState(() {});
                                 _autoPreview();
                               },
@@ -1450,7 +1486,7 @@ class _HomeScreenState extends State<HomeScreen> {
             originalWidth: picked.width,
             originalHeight: picked.height,
           );
-          setState(() => _selectedImages.add(item));
+          setState(() { _selectedImages.add(item); _imageScales.add(1.0); });
           tasks.add(_generateThumbnail(item));
         }
         if (mounted) ScaffoldMessenger.of(context).showSnackBar(
@@ -1486,7 +1522,7 @@ class _HomeScreenState extends State<HomeScreen> {
             path: file.name,
             name: file.name,
           );
-          setState(() => _selectedImages.add(item));
+          setState(() { _selectedImages.add(item); _imageScales.add(1.0); });
           tasks.add(_generateThumbnail(item));
         }
         if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('已添加 ${result.files.length} 张图片'), duration: const Duration(seconds: 1)));
@@ -1536,7 +1572,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _autoPreview() async {
     if (_selectedImages.isEmpty) {
-      setState(() { _previewBytes = null; _outputWidth = null; _outputHeight = null; });
+      setState(() { _previewBytes = null; _outputWidth = null; _outputHeight = null; _selectedSubImageIndex = null; });
       return;
     }
     // 先同步计算输出尺寸（基于原始图片尺寸，非预览缩放）
@@ -1545,8 +1581,18 @@ class _HomeScreenState extends State<HomeScreen> {
     try {
       final imageBytes = await _getThumbnailBytes();
       if (imageBytes == null) return; // 缩略图还没生成完，跳过
+      // 根据每张图的缩放因子预缩放
+      final scaledBytes = <Uint8List>[];
+      for (int i = 0; i < imageBytes.length; i++) {
+        final s = _scaleOf(i);
+        if ((s - 1.0).abs() < 0.01) {
+          scaledBytes.add(imageBytes[i]);
+        } else {
+          scaledBytes.add(await ImageStitcherService.resizeImage(imageBytes[i], s));
+        }
+      }
       final stitchedBytes = await ImageStitcherService.stitchImages(
-        imageBytes,
+        scaledBytes,
         mode: _stitchMode,
         maxPreviewDim: 2048, // 预览缩放到最大边长2048，编码快10-50倍
         addBorder: _borderPercent > 0,
@@ -1589,7 +1635,7 @@ class _HomeScreenState extends State<HomeScreen> {
       final maxH = heights.reduce((a, b) => a > b ? a : b);
       int totalW = 0;
       for (int i = 0; i < _selectedImages.length; i++) {
-        totalW += (widths[i] * maxH / heights[i]).round();
+        totalW += (widths[i] * maxH / heights[i] * _scaleOf(i)).round();
       }
       _outputWidth = totalW + bw * (_selectedImages.length + 1);
       _outputHeight = maxH + 2 * bw;
@@ -1597,11 +1643,147 @@ class _HomeScreenState extends State<HomeScreen> {
       final maxW = widths.reduce((a, b) => a > b ? a : b);
       int totalH = 0;
       for (int i = 0; i < _selectedImages.length; i++) {
-        totalH += (heights[i] * maxW / widths[i]).round();
+        totalH += (heights[i] * maxW / widths[i] * _scaleOf(i)).round();
       }
       _outputWidth = maxW + 2 * bw;
       _outputHeight = totalH + bw * (_selectedImages.length + 1);
     }
+  }
+
+  /// 计算每张子图在大预览中的显示矩形（用于点击检测）
+  List<ui.Rect> _buildSubRects(double offsetX, double offsetY,
+      double scaleX, double scaleY) {
+    if (_selectedImages.length <= 1) return [];
+    final rects = <ui.Rect>[];
+    final n = _selectedImages.length;
+    final widths = <int>[];
+    final heights = <int>[];
+    for (var item in _selectedImages) {
+      widths.add(item.originalWidth ?? 0);
+      heights.add(item.originalHeight ?? 0);
+    }
+    if (widths.contains(0)) return [];
+
+    int bw = 0;
+    if (_borderPercent > 0) {
+      final refDim = _stitchMode == StitchMode.horizontal
+          ? heights.reduce((a, b) => a > b ? a : b)
+          : widths.reduce((a, b) => a > b ? a : b);
+      bw = (refDim * _borderPercent / 100).round().clamp(1, 9999);
+    }
+    final bwDispX = bw * scaleX;
+    final bwDispY = bw * scaleY;
+
+    if (_stitchMode == StitchMode.horizontal) {
+      final maxH = heights.reduce((a, b) => a > b ? a : b);
+      double x = offsetX + bwDispX;
+      for (int i = 0; i < n; i++) {
+        final wDisp = (widths[i] * maxH / heights[i] * _scaleOf(i)) * scaleX;
+        rects.add(ui.Rect.fromLTWH(x, offsetY + bwDispY, wDisp, maxH * scaleY));
+        x += wDisp + bwDispX;
+      }
+    } else {
+      final maxW = widths.reduce((a, b) => a > b ? a : b);
+      double y = offsetY + bwDispY;
+      for (int i = 0; i < n; i++) {
+        final hDisp = (heights[i] * maxW / widths[i] * _scaleOf(i)) * scaleY;
+        rects.add(ui.Rect.fromLTWH(offsetX + bwDispX, y, maxW * scaleX, hDisp));
+        y += hDisp + bwDispY;
+      }
+    }
+    return rects;
+  }
+
+  /// 大预览图点击 → 选中对应子图
+  void _onPreviewTap(Offset localPos, List<ui.Rect> subRects) {
+    for (int i = 0; i < subRects.length; i++) {
+      if (subRects[i].contains(localPos)) {
+        setState(() {
+          _selectedSubImageIndex = _selectedSubImageIndex == i ? null : i;
+        });
+        return;
+      }
+    }
+    // 点到空白区域 → 取消选中
+    setState(() => _selectedSubImageIndex = null);
+  }
+
+  /// 角点拖拽：实时更新 UI（标尺+手柄），延迟渲染预览图
+  void _onCornerDrag(DragUpdateDetails details) {
+    if (_selectedSubImageIndex == null) return;
+    final idx = _selectedSubImageIndex!;
+    final current = _scaleOf(idx);
+    final delta = _stitchMode == StitchMode.horizontal
+        ? details.delta.dx
+        : details.delta.dy;
+    final change = delta / 400;
+    final newScale = (current + change).clamp(1.0, 3.0);
+    if ((newScale - current).abs() > 0.002) {
+      setState(() {
+        while (_imageScales.length <= idx) _imageScales.add(1.0);
+        _imageScales[idx] = double.parse(newScale.toStringAsFixed(2));
+      });
+      _calculateOutputDimensions(); // 同步更新标尺
+      _debouncePreview();           // 延迟重新渲染预览图
+    }
+  }
+
+  /// 拖拽结束：立即渲染最终的预览图
+  void _onCornerDragEnd(DragEndDetails details) {
+    _previewDebounce?.cancel();
+    _autoPreview();
+  }
+
+  /// 防抖预览：100ms 内无新拖拽才触发重渲染
+  void _debouncePreview() {
+    _previewDebounce?.cancel();
+    _previewDebounce = Timer(const Duration(milliseconds: 100), () {
+      if (mounted) _autoPreview();
+    });
+  }
+
+  /// 构建四个角点拖拽手柄
+  List<Widget> _buildCornerHandles(ui.Rect r) {
+    const double size = 14;
+    const double half = size / 2;
+    final corners = [
+      Offset(r.left - half, r.top - half),
+      Offset(r.right - half, r.top - half),
+      Offset(r.left - half, r.bottom - half),
+      Offset(r.right - half, r.bottom - half),
+    ];
+    final cursors = [
+      SystemMouseCursors.resizeUpLeft,
+      SystemMouseCursors.resizeUpRight,
+      SystemMouseCursors.resizeDownLeft,
+      SystemMouseCursors.resizeDownRight,
+    ];
+    return List.generate(4, (i) {
+      return Positioned(
+        left: corners[i].dx,
+        top: corners[i].dy,
+        width: size,
+        height: size,
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onPanUpdate: _onCornerDrag,
+          onPanEnd: _onCornerDragEnd,
+          child: MouseRegion(
+            cursor: cursors[i],
+            child: Container(
+              decoration: BoxDecoration(
+                color: Colors.white,
+                shape: BoxShape.circle,
+                border: Border.all(color: Colors.blueAccent, width: 2),
+                boxShadow: const [
+                  BoxShadow(color: Colors.black26, blurRadius: 2),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+    });
   }
 
   void _startSaveTimer() {
@@ -1623,6 +1805,7 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void dispose() {
     _stopSaveTimer();
+    _previewDebounce?.cancel();
     super.dispose();
   }
 
@@ -1632,8 +1815,18 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() { _isProcessing = true; _saveProgress = 0.0; });
     try {
       final imageBytes = await _getSelectedImageBytes();
+      // 根据每张图的缩放因子预缩放
+      final scaledBytes = <Uint8List>[];
+      for (int i = 0; i < imageBytes.length; i++) {
+        final s = _scaleOf(i);
+        if ((s - 1.0).abs() < 0.01) {
+          scaledBytes.add(imageBytes[i]);
+        } else {
+          scaledBytes.add(await ImageStitcherService.resizeImage(imageBytes[i], s));
+        }
+      }
       final fullResBytes = await ImageStitcherService.stitchImages(
-        imageBytes,
+        scaledBytes,
         mode: _stitchMode,
         onProgress: (p) { _saveProgress = p; if (mounted) setState(() {}); },
         addBorder: _borderPercent > 0,
@@ -1695,7 +1888,7 @@ class _HomeScreenState extends State<HomeScreen> {
   void _reorderImages() {
     final reordered = List<ImageItem>.from(_selectedImages);
     showDialog(context: context, builder: (ctx) => AlertDialog(title: const Row(children: [Icon(Icons.sort, size: 20), SizedBox(width: 8), Text('调整图片顺序')]), content: SizedBox(width: double.maxFinite, height: 320,     child: ReorderableListView.builder(shrinkWrap: true, itemCount: reordered.length, onReorder: (oldIndex, newIndex) {
-      setState(() { if (newIndex > oldIndex) newIndex--; final item = reordered.removeAt(oldIndex); reordered.insert(newIndex, item); _selectedImages.clear(); _selectedImages.addAll(reordered); }); _autoPreview();
+      setState(() { if (newIndex > oldIndex) newIndex--; final item = reordered.removeAt(oldIndex); reordered.insert(newIndex, item); _selectedImages.clear(); _imageScales.clear(); _selectedImages.addAll(reordered); for (int i = 0; i < _selectedImages.length; i++) _imageScales.add(1.0); }); _autoPreview();
     }, itemBuilder: (ctx, index) {
       final item = reordered[index];
       return ListTile(key: ValueKey(item.path), dense: true, contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2), leading: CircleAvatar(radius: 14, backgroundColor: Theme.of(ctx).colorScheme.primary, foregroundColor: Colors.white, child: Text('${index + 1}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold))), title: Text(item.name, overflow: TextOverflow.ellipsis, maxLines: 1, style: const TextStyle(fontSize: 13)), trailing: const Icon(Icons.drag_handle, color: Colors.grey, size: 20));
@@ -1751,6 +1944,8 @@ class _DimensionPainter extends CustomPainter {
   final StitchMode stitchMode;
   final List<({int width, int height})> originalDims;
   final double borderPercent;
+  final int? selectedIndex;
+  final List<double> imageScales;
 
   _DimensionPainter({
     required this.imageLeft,
@@ -1764,6 +1959,8 @@ class _DimensionPainter extends CustomPainter {
     required this.stitchMode,
     required this.originalDims,
     required this.borderPercent,
+    this.selectedIndex,
+    this.imageScales = const [],
   });
 
   static const double _extensionGap = 12;  // 延伸线与图片边缘的间距
@@ -1786,6 +1983,32 @@ class _DimensionPainter extends CustomPainter {
 
     // ---------- 计算每张子图的显示区域 ----------
     final subRects = _computeSubRects(scaleX, scaleY, imgLeft, imgTop);
+
+    // ---------- 选中高亮 ----------
+    if (selectedIndex != null && selectedIndex! < subRects.length) {
+      final sr = subRects[selectedIndex!];
+      canvas.drawRect(
+        sr,
+        Paint()
+          ..color = const ui.Color(0x444488FF)
+          ..style = PaintingStyle.fill,
+      );
+      canvas.drawRect(
+        sr,
+        Paint()
+          ..color = const ui.Color(0xCC4488FF)
+          ..strokeWidth = 2.0
+          ..style = PaintingStyle.stroke,
+      );
+      // 缩放百分比
+      final sc = selectedIndex! < imageScales.length
+          ? imageScales[selectedIndex!] : 1.0;
+      if ((sc - 1.0).abs() > 0.01) {
+        _drawDimTextTiny(canvas, '${(sc * 100).toInt()}%',
+            Offset(sr.left + sr.width / 2, sr.top + sr.height / 2),
+            TextAlign.center);
+      }
+    }
 
     // ---------- 总体标注：底部宽度 ----------
     final hExtLeft = imgLeft + _extensionGap;
@@ -1899,7 +2122,8 @@ class _DimensionPainter extends CustomPainter {
       final maxH = heights.reduce((a, b) => a > b ? a : b);
       double x = offsetX + bwDispX;
       for (int i = 0; i < n; i++) {
-        final wDisp = (widths[i] * maxH / heights[i]) * scaleX;
+        final s = i < imageScales.length ? imageScales[i] : 1.0;
+        final wDisp = (widths[i] * maxH / heights[i] * s) * scaleX;
         rects.add(ui.Rect.fromLTWH(x, offsetY + bwDispY, wDisp, maxH * scaleY));
         x += wDisp + bwDispX;
       }
@@ -1907,7 +2131,8 @@ class _DimensionPainter extends CustomPainter {
       final maxW = widths.reduce((a, b) => a > b ? a : b);
       double y = offsetY + bwDispY;
       for (int i = 0; i < n; i++) {
-        final hDisp = (heights[i] * maxW / widths[i]) * scaleY;
+        final s = i < imageScales.length ? imageScales[i] : 1.0;
+        final hDisp = (heights[i] * maxW / widths[i] * s) * scaleY;
         rects.add(ui.Rect.fromLTWH(offsetX + bwDispX, y, maxW * scaleX, hDisp));
         y += hDisp + bwDispY;
       }
@@ -2031,6 +2256,7 @@ class _DimensionPainter extends CustomPainter {
         imageHeight != oldDelegate.imageHeight ||
         displayWidth != oldDelegate.displayWidth ||
         displayHeight != oldDelegate.displayHeight ||
-        stitchMode != oldDelegate.stitchMode;
+        stitchMode != oldDelegate.stitchMode ||
+        selectedIndex != oldDelegate.selectedIndex;
   }
 }
