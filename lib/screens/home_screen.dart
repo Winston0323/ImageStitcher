@@ -56,8 +56,9 @@ class _HomeScreenState extends State<HomeScreen> {
   List<double> _imageScales = [];
   // 每张图的平移偏移（源像素，0,0=居中）
   List<Offset> _imageOffsets = [];
-  // 图片拖拽平移：上一次指针位置
+  // 图片拖拽平移：上一次指针位置 + 跟踪的指针 ID
   Offset? _panLastPos;
+  int? _panPointerId;
   // 角点拖拽状态
   int _dragCornerIndex = 0;
   double _dragStartScale = 1.0;
@@ -208,6 +209,7 @@ class _HomeScreenState extends State<HomeScreen> {
         if (_canLivePreview && _outputWidth != null && _outputHeight != null)
           InteractiveViewer(
             panEnabled: _selectedSubImageIndex == null,
+            scaleEnabled: _selectedSubImageIndex == null,
             minScale: 0.15,
             maxScale: 8.0,
             boundaryMargin: const EdgeInsets.all(40),
@@ -263,16 +265,23 @@ class _HomeScreenState extends State<HomeScreen> {
                           width: dispW, height: dispH,
                           child: Listener(
                             onPointerDown: (e) {
-                              if (_selectedSubImageIndex != null) _panLastPos = e.localPosition;
+                              if (_selectedSubImageIndex != null && _panPointerId == null) {
+                                _panPointerId = e.pointer;
+                                _panLastPos = e.localPosition;
+                              }
                             },
                             onPointerMove: (e) {
-                              if (_selectedSubImageIndex == null || _panLastPos == null) return;
+                              if (_selectedSubImageIndex == null || _panLastPos == null || e.pointer != _panPointerId) return;
                               final delta = e.localPosition - _panLastPos!;
                               _panLastPos = e.localPosition;
                               _onImagePanDelta(delta);
                             },
-                            onPointerUp: (_) => _panLastPos = null,
-                            onPointerCancel: (_) => _panLastPos = null,
+                            onPointerUp: (e) {
+                              if (e.pointer == _panPointerId) { _panPointerId = null; _panLastPos = null; }
+                            },
+                            onPointerCancel: (e) {
+                              if (e.pointer == _panPointerId) { _panPointerId = null; _panLastPos = null; }
+                            },
                             child: ClipRRect(
                             borderRadius: BorderRadius.circular(2),
                             child: CustomPaint(
