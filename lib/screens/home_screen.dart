@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:path_provider/path_provider.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:gal/gal.dart';
@@ -56,24 +57,17 @@ class _HomeScreenState extends State<HomeScreen> {
   List<double> _imageScales = [];
   // 每张图的平移偏移（源像素，0,0=居中）
   List<Offset> _imageOffsets = [];
-  // 图片拖拽平移：上一次指针位置 + 跟踪的指针 ID
+  // 子图拖拽平移
   Offset? _panLastPos;
   int? _panPointerId;
-  // 角点拖拽状态
-  int _dragCornerIndex = 0;
-  double _dragStartScale = 1.0;
-  Offset _dragTotalDelta = Offset.zero;
-  // 选中子图的源/显示像素比（用于拖拽转换）
-  double _selectedSrcToDispRatio = 1.0;
-  // 触屏模式 + 多指手势
-  bool _isTouchMode = false;
+  // 双指缩放
   final Map<int, Offset> _activePointers = {};
   double? _pinchStartDist;
   double _pinchStartScale = 1.0;
-  // 选中子图的显示矩形（用于触屏 hit-test）
+  // 选中子图的源/显示像素比 + 显示矩形
+  double _selectedSrcToDispRatio = 1.0;
   ui.Rect? _selectedSubRect;
-  // 大图手动平移
-  Offset? _viewPanLastPos;
+  // 大图变换
   final TransformationController _viewController = TransformationController();
   // 实时预览：缓存解码后的缩略图 ui.Image
   List<ui.Image?> _decodedThumbs = [];
@@ -219,8 +213,8 @@ class _HomeScreenState extends State<HomeScreen> {
         if (_canLivePreview && _outputWidth != null && _outputHeight != null)
           InteractiveViewer(
             transformationController: _viewController,
-            panEnabled: !(_isTouchMode && _selectedSubImageIndex != null),
-            scaleEnabled: !(_isTouchMode && _selectedSubImageIndex != null),
+            panEnabled: _selectedSubImageIndex == null,
+            scaleEnabled: _selectedSubImageIndex == null,
             minScale: 0.15,
             maxScale: 8.0,
             boundaryMargin: const EdgeInsets.all(40),
@@ -276,37 +270,47 @@ class _HomeScreenState extends State<HomeScreen> {
                           left: left, top: top,
                           width: dispW, height: dispH,
                           child: Listener(
-                            onPointerDown: (e) {
-                              if (e.kind != ui.PointerDeviceKind.touch) return;
-                              if (!_isTouchMode) setState(() => _isTouchMode = true);
-                              _activePointers[e.pointer] = e.localPosition;
-                              if (_selectedSubImageIndex != null && _activePointers.length == 2) {
-                                // 开始双指缩放子图
-                                final pts = _activePointers.values.toList();
-                                _pinchStartDist = (pts[0] - pts[1]).distance;
-                                _pinchStartScale = _scaleOf(_selectedSubImageIndex!);
-                                _panPointerId = null; // 取消单指拖拽
-                              } else if (_selectedSubImageIndex != null && _activePointers.length == 1) {
-                                // 单指：判断是否在子图内
-                                if (_selectedSubRect != null && _selectedSubRect!.contains(e.localPosition)) {
-                                  _panPointerId = e.pointer;
-                                  _panLastPos = e.localPosition;
-                                } else {
-                                  // 在子图外 → 平移大图
-                                  _viewPanLastPos = e.localPosition;
+                            onPointerSignal: (e) {
+                              // 鼠标滚轮缩放子图
+                              if (_selectedSubImageIndex == null) return;
+                              if (e is PointerScrollEvent) {
+                                final idx = _selectedSubImageIndex!;
+                                final cur = _scaleOf(idx);
+                                final newScale = (cur - e.scrollDelta.dy / 400).clamp(1.0, 3.0);
+                                if ((newScale - cur).abs() > 0.002) {
+                                  setState(() {
+                                    while (_imageScales.length <= idx) _imageScales.add(1.0);
+                                    _imageScales[idx] = double.parse(newScale.toStringAsFixed(2));
+                                  });
+                                  _calculateOutputDimensions();
                                 }
                               }
                             },
+                            onPointerDown: (e) {
+                              if (_selectedSubImageIndex == null) return;
+                              _activePointers[e.pointer] = e.localPosition;
+                              if (_activePointers.length == 2) {
+                                // 双指缩放开始
+                                final pts = _activePointers.values.toList();
+                                _pinchStartDist = (pts[0] - pts[1]).distance;
+                                _pinchStartScale = _scaleOf(_selectedSubImageIndex!);
+                                _panPointerId = null;
+                                _panLastPos = null;
+                              } else if (_activePointers.length == 1) {
+                                // 单指拖拽开始
+                                _panPointerId = e.pointer;
+                                _panLastPos = e.localPosition;
+                              }
+                            },
                             onPointerMove: (e) {
-                              if (e.kind != ui.PointerDeviceKind.touch) return;
+                              if (_selectedSubImageIndex == null) return;
                               if (!_activePointers.containsKey(e.pointer)) return;
                               _activePointers[e.pointer] = e.localPosition;
-                              if (_selectedSubImageIndex != null && _activePointers.length >= 2 && _pinchStartDist != null) {
+                              if (_activePointers.length >= 2 && _pinchStartDist != null) {
                                 // 双指缩放子图
                                 final pts = _activePointers.values.toList();
                                 final dist = (pts[0] - pts[1]).distance;
-                                final factor = dist / _pinchStartDist!;
-                                final newScale = (_pinchStartScale * factor).clamp(1.0, 3.0);
+                                final newScale = (_pinchStartScale * dist / _pinchStartDist!).clamp(1.0, 3.0);
                                 final idx = _selectedSubImageIndex!;
                                 final cur = _scaleOf(idx);
                                 if ((newScale - cur).abs() > 0.002) {
@@ -321,32 +325,17 @@ class _HomeScreenState extends State<HomeScreen> {
                                 final delta = e.localPosition - _panLastPos!;
                                 _panLastPos = e.localPosition;
                                 _onImagePanDelta(delta);
-                              } else if (_viewPanLastPos != null && e.pointer == _activePointers.keys.first) {
-                                // 单指平移大图
-                                final delta = e.localPosition - _viewPanLastPos!;
-                                _viewPanLastPos = e.localPosition;
-                                final matrix = _viewController.value.clone();
-                                matrix.translate(delta.dx, delta.dy, 0);
-                                _viewController.value = matrix;
                               }
                             },
                             onPointerUp: (e) {
-                              if (e.kind != ui.PointerDeviceKind.touch) return;
                               _activePointers.remove(e.pointer);
                               if (e.pointer == _panPointerId) { _panPointerId = null; _panLastPos = null; }
-                              if (_activePointers.isEmpty) {
-                                _pinchStartDist = null;
-                                _viewPanLastPos = null;
-                              }
+                              if (_activePointers.isEmpty) _pinchStartDist = null;
                             },
                             onPointerCancel: (e) {
-                              if (e.kind != ui.PointerDeviceKind.touch) return;
                               _activePointers.remove(e.pointer);
                               if (e.pointer == _panPointerId) { _panPointerId = null; _panLastPos = null; }
-                              if (_activePointers.isEmpty) {
-                                _pinchStartDist = null;
-                                _viewPanLastPos = null;
-                              }
+                              if (_activePointers.isEmpty) _pinchStartDist = null;
                             },
                             child: ClipRRect(
                             borderRadius: BorderRadius.circular(2),
@@ -396,12 +385,6 @@ class _HomeScreenState extends State<HomeScreen> {
                             ),
                           ),
                         ),
-                        // 选中子图的四个角点拖拽手柄（触屏模式下隐藏，用双指缩放）
-                        if (_selectedSubImageIndex != null &&
-                            _selectedSubImageIndex! < subRects.length &&
-                            !_isTouchMode)
-                          ..._buildCornerHandles(
-                              subRects[_selectedSubImageIndex!]),
                       ],
                     ),
                     ),
@@ -1867,42 +1850,6 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() { _selectedSubImageIndex = null; _selectedSubRect = null; });
   }
 
-  /// 角点拖拽开始：记录初始状态
-  void _onCornerDragStart(DragStartDetails details, int cornerIndex) {
-    _dragCornerIndex = cornerIndex;
-    _dragStartScale = _scaleOf(_selectedSubImageIndex ?? 0);
-    _dragTotalDelta = Offset.zero;
-  }
-
-  /// 角点拖拽：沿中心缩放，比例不变
-  void _onCornerDrag(DragUpdateDetails details) {
-    if (_selectedSubImageIndex == null) return;
-    final idx = _selectedSubImageIndex!;
-    _dragTotalDelta += details.delta;
-
-    // 四个角的外向方向（向外拖 = 放大）
-    // 0=左上(-1,-1)  1=右上(+1,-1)  2=左下(-1,+1)  3=右下(+1,+1)
-    const signs = [
-      (-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0),
-    ];
-    final (sx, sy) = signs[_dragCornerIndex];
-    // 将累计 delta 投影到外向对角线方向
-    final outward = (_dragTotalDelta.dx * sx + _dragTotalDelta.dy * sy) / math.sqrt2;
-    final change = outward / 200; // 200px 拖拽 ≈ 100% 缩放
-    final newScale = (_dragStartScale + change).clamp(1.0, 3.0);
-    final current = _scaleOf(idx);
-    if ((newScale - current).abs() > 0.002) {
-      setState(() {
-        while (_imageScales.length <= idx) _imageScales.add(1.0);
-        _imageScales[idx] = double.parse(newScale.toStringAsFixed(2));
-      });
-      _calculateOutputDimensions();
-    }
-  }
-
-  /// 拖拽结束：GPU 实时预览已同步，无需额外处理
-  void _onCornerDragEnd(DragEndDetails details) {}
-
   /// 选中子图拖拽：平移裁剪中心，限制在图片范围内
   void _onImagePanDelta(Offset displayDelta) {
     if (_selectedSubImageIndex == null) return;
@@ -1932,50 +1879,7 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  /// 构建四个角点拖拽手柄
-  List<Widget> _buildCornerHandles(ui.Rect r) {
-    const double size = 14;
-    const double half = size / 2;
-    final corners = [
-      Offset(r.left - half, r.top - half),
-      Offset(r.right - half, r.top - half),
-      Offset(r.left - half, r.bottom - half),
-      Offset(r.right - half, r.bottom - half),
-    ];
-    final cursors = [
-      SystemMouseCursors.resizeUpLeft,
-      SystemMouseCursors.resizeUpRight,
-      SystemMouseCursors.resizeDownLeft,
-      SystemMouseCursors.resizeDownRight,
-    ];
-    return List.generate(4, (i) {
-      return Positioned(
-        left: corners[i].dx,
-        top: corners[i].dy,
-        width: size,
-        height: size,
-        child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onPanStart: (d) => _onCornerDragStart(d, i),
-          onPanUpdate: _onCornerDrag,
-          onPanEnd: _onCornerDragEnd,
-          child: MouseRegion(
-            cursor: cursors[i],
-            child: Container(
-              decoration: BoxDecoration(
-                color: Colors.white,
-                shape: BoxShape.circle,
-                border: Border.all(color: Colors.blueAccent, width: 2),
-                boxShadow: const [
-                  BoxShadow(color: Colors.black26, blurRadius: 2),
-                ],
-              ),
-            ),
-          ),
-        ),
-      );
-    });
-  }
+
 
   void _startSaveTimer() {
     _stopSaveTimer();
