@@ -271,9 +271,9 @@ class _HomeScreenState extends State<HomeScreen> {
                           width: dispW, height: dispH,
                           child: Listener(
                             onPointerSignal: (e) {
-                              // 鼠标滚轮缩放子图
-                              if (_selectedSubImageIndex == null) return;
-                              if (e is PointerScrollEvent) {
+                              if (e is! PointerScrollEvent) return;
+                              if (_selectedSubImageIndex != null) {
+                                // 滚轮缩放子图
                                 final idx = _selectedSubImageIndex!;
                                 final cur = _scaleOf(idx);
                                 final newScale = (cur - e.scrollDelta.dy / 400).clamp(1.0, 3.0);
@@ -284,6 +284,14 @@ class _HomeScreenState extends State<HomeScreen> {
                                   });
                                   _calculateOutputDimensions();
                                 }
+                              } else {
+                                // 滚轮缩放大图
+                                final cur = _viewController.value.getMaxScaleOnAxis();
+                                final newScale = (cur - e.scrollDelta.dy / 400).clamp(0.15, 8.0);
+                                final factor = newScale / cur;
+                                final matrix = _viewController.value.clone();
+                                matrix.scale(factor);
+                                _viewController.value = matrix;
                               }
                             },
                             onPointerDown: (e) {
