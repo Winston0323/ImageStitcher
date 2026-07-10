@@ -59,6 +59,8 @@ class _HomeScreenState extends State<HomeScreen> {
   List<Offset> _imageOffsets = [];
   // 子图拖拽平移
   Offset? _panLastPos;
+  Offset? _panStartPos; // 拖拽起始位置（用于阈值判断）
+  bool _panActive = false; // 是否已越过阈值，开始实际拖拽
   int? _panPointerId;
   // 双指缩放
   final Map<int, Offset> _activePointers = {};
@@ -304,10 +306,13 @@ class _HomeScreenState extends State<HomeScreen> {
                                 _pinchStartScale = _scaleOf(_selectedSubImageIndex!);
                                 _panPointerId = null;
                                 _panLastPos = null;
+                                _panActive = false;
                               } else if (_activePointers.length == 1) {
-                                // 单指拖拽开始
+                                // 单指：记录起始位置，延迟判断是点击还是拖拽
                                 _panPointerId = e.pointer;
                                 _panLastPos = e.localPosition;
+                                _panStartPos = e.localPosition;
+                                _panActive = false;
                               }
                             },
                             onPointerMove: (e) {
@@ -329,20 +334,27 @@ class _HomeScreenState extends State<HomeScreen> {
                                   _calculateOutputDimensions();
                                 }
                               } else if (e.pointer == _panPointerId && _panLastPos != null) {
-                                // 单指拖拽子图
-                                final delta = e.localPosition - _panLastPos!;
-                                _panLastPos = e.localPosition;
-                                _onImagePanDelta(delta);
+                                // 单指：超过阈值才开始拖拽，避免误触
+                                if (!_panActive && _panStartPos != null) {
+                                  if ((e.localPosition - _panStartPos!).distance < 10) return;
+                                  _panActive = true;
+                                  _panLastPos = e.localPosition; // 重置基准，避免跳变
+                                }
+                                if (_panActive) {
+                                  final delta = e.localPosition - _panLastPos!;
+                                  _panLastPos = e.localPosition;
+                                  _onImagePanDelta(delta);
+                                }
                               }
                             },
                             onPointerUp: (e) {
                               _activePointers.remove(e.pointer);
-                              if (e.pointer == _panPointerId) { _panPointerId = null; _panLastPos = null; }
+                              if (e.pointer == _panPointerId) { _panPointerId = null; _panLastPos = null; _panActive = false; }
                               if (_activePointers.isEmpty) _pinchStartDist = null;
                             },
                             onPointerCancel: (e) {
                               _activePointers.remove(e.pointer);
-                              if (e.pointer == _panPointerId) { _panPointerId = null; _panLastPos = null; }
+                              if (e.pointer == _panPointerId) { _panPointerId = null; _panLastPos = null; _panActive = false; }
                               if (_activePointers.isEmpty) _pinchStartDist = null;
                             },
                             child: ClipRRect(
@@ -368,6 +380,18 @@ class _HomeScreenState extends State<HomeScreen> {
                           ),
                           ),
                         ),
+                        // 选中高亮（独立于标尺，始终显示）
+                        if (_selectedSubImageIndex != null &&
+                            _selectedSubImageIndex! < subRects.length)
+                          Positioned.fill(
+                            child: IgnorePointer(
+                              child: CustomPaint(
+                                painter: _HighlightPainter(
+                                  subRects[_selectedSubImageIndex!],
+                                ),
+                              ),
+                            ),
+                          ),
                         // 工程图样式标注 - 填满容器以确保有空间画延伸线
                         if (_showRuler)
                           Positioned.fill(
@@ -2071,32 +2095,6 @@ class _DimensionPainter extends CustomPainter {
     // ---------- 计算每张子图的显示区域 ----------
     final subRects = _computeSubRects(scaleX, scaleY, imgLeft, imgTop);
 
-    // ---------- 选中高亮 ----------
-    if (selectedIndex != null && selectedIndex! < subRects.length) {
-      final sr = subRects[selectedIndex!];
-      canvas.drawRect(
-        sr,
-        Paint()
-          ..color = const ui.Color(0x444488FF)
-          ..style = PaintingStyle.fill,
-      );
-      canvas.drawRect(
-        sr,
-        Paint()
-          ..color = const ui.Color(0xCC4488FF)
-          ..strokeWidth = 2.0
-          ..style = PaintingStyle.stroke,
-      );
-      // 缩放百分比
-      final sc = selectedIndex! < imageScales.length
-          ? imageScales[selectedIndex!] : 1.0;
-      if ((sc - 1.0).abs() > 0.01) {
-        _drawDimTextTiny(canvas, '${(sc * 100).toInt()}%',
-            Offset(sr.left + sr.width / 2, sr.top + sr.height / 2),
-            TextAlign.center);
-      }
-    }
-
     // ---------- 总体标注：底部宽度 ----------
     final hExtLeft = imgLeft + _extensionGap;
     final hExtRight = imgRight - _extensionGap;
@@ -2344,6 +2342,29 @@ class _DimensionPainter extends CustomPainter {
         stitchMode != oldDelegate.stitchMode ||
         selectedIndex != oldDelegate.selectedIndex;
   }
+}
+
+
+/// 选中高亮 Painter（独立于标尺，仅由选中状态决定）
+class _HighlightPainter extends CustomPainter {
+  final ui.Rect rect;
+  _HighlightPainter(this.rect);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    canvas.drawRect(
+      rect,
+      Paint()..color = const ui.Color(0x444488FF)..style = PaintingStyle.fill,
+    );
+    canvas.drawRect(
+      rect,
+      Paint()..color = const ui.Color(0xCC4488FF)..strokeWidth = 2.0..style = PaintingStyle.stroke,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _HighlightPainter oldDelegate) =>
+      rect != oldDelegate.rect;
 }
 
 /// 实时预览 Painter：拖拽时直接用 GPU 画布绘制，跳过 PNG 编解码
