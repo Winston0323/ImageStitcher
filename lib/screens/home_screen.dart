@@ -2354,11 +2354,7 @@ class _HighlightPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     canvas.drawRect(
       rect,
-      Paint()..color = const ui.Color(0x444488FF)..style = PaintingStyle.fill,
-    );
-    canvas.drawRect(
-      rect,
-      Paint()..color = const ui.Color(0xCC4488FF)..strokeWidth = 2.0..style = PaintingStyle.stroke,
+      Paint()..color = const ui.Color(0xFF4488FF)..strokeWidth = 3.0..style = PaintingStyle.stroke,
     );
   }
 
@@ -2493,12 +2489,31 @@ class _LivePreviewPainter extends CustomPainter {
       ui.Paint()..color = const ui.Color(0xFFFFFFFF),
     );
 
+    // 彩虹边框：渐变跨越整个画布（与 stitchImages 服务端一致）
+    ui.Shader? rainbowShader;
+    if (addBorder && rainbowBorder) {
+      rainbowShader = const LinearGradient(
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+        colors: [
+          ui.Color(0xFFFF0000), ui.Color(0xFFFF7F00),
+          ui.Color(0xFFFFFF00), ui.Color(0xFF00FF00),
+          ui.Color(0xFF0000FF), ui.Color(0xFF4B0082),
+          ui.Color(0xFF8B00FF),
+        ],
+      ).createShader(ui.Rect.fromLTWH(0, 0, canvasW.toDouble(), canvasH.toDouble()));
+    }
+
     // 边框 + 图片
     for (int i = 0; i < images.length; i++) {
       final dst = dstRects[i];
       if (addBorder) {
         final br = ui.Rect.fromLTWH(dst.left - bw, dst.top - bw, dst.width + 2 * bw, dst.height + 2 * bw);
-        canvas.drawRect(br, ui.Paint()..color = borderColor);
+        if (rainbowBorder && rainbowShader != null) {
+          canvas.drawRect(br, ui.Paint()..shader = rainbowShader);
+        } else {
+          canvas.drawRect(br, ui.Paint()..color = borderColor);
+        }
       }
       canvas.drawImageRect(
         images[i],
