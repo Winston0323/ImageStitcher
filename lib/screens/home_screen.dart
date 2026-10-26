@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io' show Platform, File;
 import 'dart:typed_data';
 import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/gestures.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
@@ -21,12 +22,6 @@ class HomeScreen extends StatefulWidget {
 
 enum _ActiveTool { mode, border, image }
 
-class _TileData {
-  final int index;
-  final double height;
-  const _TileData({required this.index, required this.height});
-}
-
 class _HomeScreenState extends State<HomeScreen> {
   final List<ImageItem> _selectedImages = [];
   StitchMode _stitchMode = StitchMode.horizontal;
@@ -43,6 +38,9 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // 预览数据
   Uint8List? _previewBytes;
+  final ScrollController _windowsThumbScroll = ScrollController();
+
+  bool get _isWindowsDesktop => !kIsWeb && Platform.isWindows;
 
   @override
   Widget build(BuildContext context) {
@@ -239,21 +237,35 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // ========== 宽屏布局 ==========
 
-  /// 宽屏：左侧三张功能卡片 + 右侧预览
+  /// 宽屏：左侧功能卡片 + 右侧预览。
+  /// Windows 上「选择图片」整张卡片在预览下方，图片成一行，可滚动、可拖拽排序。
   Widget _buildWideLayout() {
+    final windows = _isWindowsDesktop;
+    final preview = windows
+        ? Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Expanded(child: _buildPreviewPanel()),
+              const SizedBox(height: 12),
+              _buildImageCard(),
+            ],
+          )
+        : _buildPreviewPanel();
+
     return Padding(
       padding: const EdgeInsets.all(16),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // 左侧三张独立卡片
           SizedBox(
             width: 280,
             child: SingleChildScrollView(
               child: Column(
                 children: [
-                  _buildImageCard(),
-                  const SizedBox(height: 12),
+                  if (!windows) ...[
+                    _buildImageCard(),
+                    const SizedBox(height: 12),
+                  ],
                   _buildModeCard(),
                   const SizedBox(height: 12),
                   _buildBorderCard(),
@@ -262,10 +274,157 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ),
           const SizedBox(width: 16),
-          // 右侧预览
-          Expanded(child: _buildPreviewPanel()),
+          Expanded(child: preview),
         ],
       ),
+    );
+  }
+
+  /// Windows：预览卡片下方的输入图横条。拖拽换序，滚轮或底部滚动条左右移动。
+  Widget _buildWindowsInputStrip() {
+    const thumbHeight = 84.0;
+    return SizedBox(
+      height: thumbHeight + 14,
+      child: Listener(
+        onPointerSignal: (event) {
+          if (event is! PointerScrollEvent || !_windowsThumbScroll.hasClients) return;
+          final position = _windowsThumbScroll.position;
+          if (!position.hasContentDimensions || position.maxScrollExtent <= 0) return;
+          final delta = event.scrollDelta.dy != 0 ? event.scrollDelta.dy : event.scrollDelta.dx;
+          final target = (position.pixels + delta).clamp(0.0, position.maxScrollExtent).toDouble();
+          _windowsThumbScroll.jumpTo(target);
+        },
+        child: Scrollbar(
+          controller: _windowsThumbScroll,
+          thumbVisibility: true,
+          child: ReorderableListView.builder(
+            scrollController: _windowsThumbScroll,
+            scrollDirection: Axis.horizontal,
+            buildDefaultDragHandles: false,
+            padding: const EdgeInsets.only(bottom: 12, right: 4),
+            itemCount: _selectedImages.length,
+            onReorderItem: (oldIndex, newIndex) {
+              setState(() {
+                final item = _selectedImages.removeAt(oldIndex);
+                _selectedImages.insert(newIndex, item);
+              });
+              _autoPreview();
+            },
+            proxyDecorator: (child, index, animation) {
+              return AnimatedBuilder(
+                animation: animation,
+                builder: (context, child) => Material(
+                  elevation: 4 * animation.value,
+                  borderRadius: BorderRadius.circular(8),
+                  color: Colors.transparent,
+                  child: child,
+                ),
+                child: child,
+              );
+            },
+            itemBuilder: (_, index) {
+              final item = _selectedImages[index];
+              return Padding(
+                key: ObjectKey(item),
+                padding: const EdgeInsets.only(right: 8),
+                child: _windowsInputThumb(index, thumbHeight),
+              );
+            },
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _windowsInputThumb(int index, double thumbHeight) {
+    final item = _selectedImages[index];
+    var thumbWidth = thumbHeight;
+    if (item.thumbWidth != null && item.thumbHeight != null && item.thumbHeight! > 0) {
+      thumbWidth = thumbHeight * item.thumbWidth! / item.thumbHeight!;
+    }
+    return SizedBox(
+      width: thumbWidth,
+      height: thumbHeight,
+      child: Stack(
+        children: [
+          ReorderableDragStartListener(
+            index: index,
+            child: MouseRegion(
+              cursor: SystemMouseCursors.grab,
+              child: Tooltip(
+                message: '拖拽调整顺序',
+                child: Container(
+                  width: thumbWidth,
+                  height: thumbHeight,
+                  decoration: BoxDecoration(
+                    color: Colors.grey[800],
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(8),
+                    child: item.thumbnailBytes != null
+                        ? Image.memory(item.thumbnailBytes!, fit: BoxFit.cover)
+                        : Image.memory(item.bytes, fit: BoxFit.cover,
+                            errorBuilder: (_, __, ___) => _placeholderIcon()),
+                  ),
+                ),
+              ),
+            ),
+          ),
+          Positioned(
+            top: 2, left: 2,
+            child: IgnorePointer(
+              child: Container(
+                width: 18, height: 18,
+                decoration: BoxDecoration(
+                  color: Theme.of(context).colorScheme.primary,
+                  borderRadius: BorderRadius.circular(9),
+                ),
+                alignment: Alignment.center,
+                child: Text('${index + 1}',
+                    style: const TextStyle(fontSize: 10, color: Colors.white, fontWeight: FontWeight.bold)),
+              ),
+            ),
+          ),
+          Positioned(
+            top: 0, right: 0,
+            child: GestureDetector(
+              onTap: () {
+                setState(() => _selectedImages.removeAt(index));
+                _autoPreview();
+              },
+              behavior: HitTestBehavior.opaque,
+              child: const Padding(
+                padding: EdgeInsets.all(2),
+                child: Icon(Icons.cancel, size: 16, color: Colors.white, shadows: [Shadow(blurRadius: 3, color: Colors.black45)]),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildWindowsAddButton() {
+    final hasImages = _selectedImages.isNotEmpty;
+    return SizedBox(
+      height: 40,
+      child: hasImages
+          ? OutlinedButton.icon(
+              onPressed: _pickImages,
+              icon: const Icon(Icons.add_photo_alternate_outlined, size: 16),
+              label: const Text('继续添加', style: TextStyle(fontSize: 12)),
+              style: OutlinedButton.styleFrom(
+                minimumSize: const Size(double.infinity, 40),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+              ),
+            )
+          : ElevatedButton.icon(
+              onPressed: _pickImages,
+              icon: const Icon(Icons.add, size: 18),
+              label: const Text('添加图片'),
+              style: ElevatedButton.styleFrom(minimumSize: const Size(double.infinity, 40)),
+            ),
     );
   }
 
@@ -278,7 +437,18 @@ class _HomeScreenState extends State<HomeScreen> {
       title: '选择图片',
       subtitle: _selectedImages.isEmpty ? '未添加' : '已添加 ${_selectedImages.length} 张',
       onClear: _selectedImages.isNotEmpty ? () => setState(() { _selectedImages.clear(); _previewBytes = null; }) : null,
-      child: _buildImageContentWide(),
+      child: _isWindowsDesktop
+          ? Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _buildWindowsAddButton(),
+                if (_selectedImages.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  _buildWindowsInputStrip(),
+                ],
+              ],
+            )
+          : _buildImageContentWide(),
     );
   }
 
@@ -832,8 +1002,7 @@ class _HomeScreenState extends State<HomeScreen> {
       );
     }
 
-    // 2 列瀑布流，按原图比例计算高度
-    const cols = 2;
+    // 单列，按原图比例计算高度，顺序自上而下
     const gap = 6.0;
 
     return Column(
@@ -842,48 +1011,57 @@ class _HomeScreenState extends State<HomeScreen> {
         // 添加按钮
         SizedBox(
           height: 40,
-          child: OutlinedButton.icon(
-            onPressed: _pickImages,
-            icon: const Icon(Icons.add_photo_alternate_outlined, size: 16),
-            label: const Text('继续添加', style: TextStyle(fontSize: 12)),
-            style: OutlinedButton.styleFrom(
-              minimumSize: const Size(double.infinity, 40),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-            ),
-          ),
-        ),
-        const SizedBox(height: 8),
-        // 瀑布流缩略图（两列）
-        LayoutBuilder(
-          builder: (_, constraints) {
-            final tileW = (constraints.maxWidth - gap) / cols;
-
-            final tiles = <_TileData>[];
-            for (var i = 0; i < thumbnailCount; i++) {
-              final item = _selectedImages[i];
-              final ar = (item.thumbWidth != null && item.thumbHeight != null && item.thumbHeight! > 0)
-                  ? item.thumbWidth! / item.thumbHeight!
-                  : 1.0;
-              tiles.add(_TileData(index: i, height: tileW / ar));
-            }
-
-            return Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                for (var c = 0; c < cols; c++) ...[
-                  if (c > 0) const SizedBox(width: gap),
-                  Expanded(
-                    child: Column(
-                      children: [
-                        for (var i = c; i < tiles.length; i += cols)
-                          Padding(
-                            padding: const EdgeInsets.only(bottom: gap),
-                            child: _wideImageTile(tiles[i].index, tileW, tiles[i].height),
-                          ),
-                      ],
+          child: Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: _pickImages,
+                  icon: const Icon(Icons.add_photo_alternate_outlined, size: 16),
+                  label: const Text('继续添加', style: TextStyle(fontSize: 12)),
+                  style: OutlinedButton.styleFrom(
+                    minimumSize: const Size(0, 40),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                  ),
+                ),
+              ),
+              if (thumbnailCount > 1) ...[
+                const SizedBox(width: 6),
+                SizedBox(
+                  width: 40,
+                  height: 40,
+                  child: IconButton(
+                    padding: EdgeInsets.zero,
+                    tooltip: '调整顺序',
+                    onPressed: _reorderImages,
+                    icon: const Icon(Icons.swap_vert, size: 20),
+                    style: IconButton.styleFrom(
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8),
+                        side: BorderSide(color: Theme.of(context).colorScheme.outline),
+                      ),
                     ),
                   ),
-                ],
+                ),
+              ],
+            ],
+          ),
+        ),
+        if (thumbnailCount > 1) ...[
+          const SizedBox(height: 6),
+          Text('按住图片拖到另一张上，或点排序按钮',
+              style: TextStyle(fontSize: 11, color: Colors.grey[600])),
+        ],
+        const SizedBox(height: 8),
+        LayoutBuilder(
+          builder: (_, constraints) {
+            final tileW = constraints.maxWidth;
+            return Column(
+              children: [
+                for (var i = 0; i < thumbnailCount; i++)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: gap),
+                    child: _wideImageTile(i, tileW, tileW / _thumbAspect(i)),
+                  ),
               ],
             );
           },
@@ -892,57 +1070,135 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  double _thumbAspect(int index) {
+    final item = _selectedImages[index];
+    if (item.thumbWidth != null && item.thumbHeight != null && item.thumbHeight! > 0) {
+      return item.thumbWidth! / item.thumbHeight!;
+    }
+    return 1.0;
+  }
+
+  /// 宽屏缩略图：按住拖到另一张上即可换序。父级是滚动区域，用短按长按拖拽避免和滚动抢手势。
   Widget _wideImageTile(int index, double w, double h) {
     final item = _selectedImages[index];
-    return GestureDetector(
-      onTap: () => setState(() {
-        _selectedImages.removeAt(index);
-        _autoPreview();
-      }),
-      child: Container(
-        width: w,
-        height: h,
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(6),
-          color: Colors.grey[800],
-        ),
-        clipBehavior: Clip.antiAlias,
-        child: Stack(
-          fit: StackFit.expand,
-          children: [
-            item.thumbnailBytes != null
-                ? Image.memory(item.thumbnailBytes!, fit: BoxFit.cover)
-                : Image.memory(item.bytes, fit: BoxFit.cover),
-            // 序号角标
+    return DragTarget<int>(
+      onWillAcceptWithDetails: (details) => details.data != index,
+      onAcceptWithDetails: (details) => _moveImageTo(details.data, index),
+      builder: (context, candidate, rejected) {
+        final highlighted = candidate.isNotEmpty;
+        return LongPressDraggable<int>(
+          data: index,
+          delay: const Duration(milliseconds: 150),
+          rootOverlay: true,
+          hapticFeedbackOnStart: false,
+          feedback: Material(
+            elevation: 8,
+            borderRadius: BorderRadius.circular(6),
+            clipBehavior: Clip.antiAlias,
+            child: SizedBox(width: w, height: h, child: _wideTileImage(item)),
+          ),
+          childWhenDragging: Opacity(
+            opacity: 0.3,
+            child: _wideTileFrame(item, index, w, h),
+          ),
+          child: MouseRegion(
+            cursor: SystemMouseCursors.grab,
+            child: _wideTileFrame(
+              item,
+              index,
+              w,
+              h,
+              highlighted: highlighted,
+              onRemove: () {
+                setState(() => _selectedImages.removeAt(index));
+                _autoPreview();
+              },
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _wideTileImage(ImageItem item) {
+    if (item.thumbnailBytes != null) {
+      return Image.memory(item.thumbnailBytes!, fit: BoxFit.cover);
+    }
+    return Image.memory(item.bytes, fit: BoxFit.cover);
+  }
+
+  Widget _wideTileFrame(ImageItem item, int index, double w, double h, {bool highlighted = false, VoidCallback? onRemove}) {
+    return SizedBox(
+      width: w,
+      height: h,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          DecoratedBox(
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(6),
+              color: Colors.grey[800],
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(6),
+              child: _wideTileImage(item),
+            ),
+          ),
+          Positioned(
+            top: 2, left: 2,
+            child: Container(
+              width: 16, height: 16,
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.primary,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              alignment: Alignment.center,
+              child: Text('${index + 1}',
+                  style: const TextStyle(fontSize: 9, color: Colors.white, fontWeight: FontWeight.bold)),
+            ),
+          ),
+          if (onRemove != null)
             Positioned(
-              top: 2, left: 2,
-              child: Container(
-                width: 16, height: 16,
+              top: 0, right: 0,
+              child: GestureDetector(
+                onTap: onRemove,
+                behavior: HitTestBehavior.opaque,
+                child: const Padding(
+                  padding: EdgeInsets.all(2),
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(color: Colors.black45, shape: BoxShape.circle),
+                    child: SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: Icon(Icons.close, size: 10, color: Colors.white),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          if (highlighted)
+            IgnorePointer(
+              child: DecoratedBox(
                 decoration: BoxDecoration(
-                  color: Theme.of(context).colorScheme.primary,
-                  borderRadius: BorderRadius.circular(8),
+                  borderRadius: const BorderRadius.all(Radius.circular(6)),
+                  border: Border.all(color: Theme.of(context).colorScheme.primary, width: 2),
                 ),
-                alignment: Alignment.center,
-                child: Text('${index + 1}',
-                    style: const TextStyle(fontSize: 9, color: Colors.white, fontWeight: FontWeight.bold)),
               ),
             ),
-            // 删除 X
-            Positioned(
-              top: 2, right: 2,
-              child: Container(
-                width: 16, height: 16,
-                decoration: const BoxDecoration(
-                  color: Colors.black45,
-                  shape: BoxShape.circle,
-                ),
-                child: const Icon(Icons.close, size: 10, color: Colors.white),
-              ),
-            ),
-          ],
-        ),
+        ],
       ),
     );
+  }
+
+  /// 把 [from] 放到 [to] 的位置，其余图片顺移。
+  void _moveImageTo(int from, int to) {
+    if (from == to || from < 0 || to < 0) return;
+    if (from >= _selectedImages.length || to >= _selectedImages.length) return;
+    setState(() {
+      final item = _selectedImages.removeAt(from);
+      _selectedImages.insert(to, item);
+    });
+    _autoPreview();
   }
 
   Widget _addImageBox(double size) {
@@ -1437,6 +1693,7 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void dispose() {
     _stopSaveTimer();
+    _windowsThumbScroll.dispose();
     super.dispose();
   }
 
@@ -1508,12 +1765,60 @@ class _HomeScreenState extends State<HomeScreen> {
 
   void _reorderImages() {
     final reordered = List<ImageItem>.from(_selectedImages);
-    showDialog(context: context, builder: (ctx) => AlertDialog(title: const Row(children: [Icon(Icons.sort, size: 20), SizedBox(width: 8), Text('调整图片顺序')]), content: SizedBox(width: double.maxFinite, height: 320,     child: ReorderableListView.builder(shrinkWrap: true, itemCount: reordered.length, onReorder: (oldIndex, newIndex) {
-      setState(() { if (newIndex > oldIndex) newIndex--; final item = reordered.removeAt(oldIndex); reordered.insert(newIndex, item); _selectedImages.clear(); _selectedImages.addAll(reordered); }); _autoPreview();
-    }, itemBuilder: (ctx, index) {
-      final item = reordered[index];
-      return ListTile(key: ValueKey(item.path), dense: true, contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2), leading: CircleAvatar(radius: 14, backgroundColor: Theme.of(ctx).colorScheme.primary, foregroundColor: Colors.white, child: Text('${index + 1}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold))), title: Text(item.name, overflow: TextOverflow.ellipsis, maxLines: 1, style: const TextStyle(fontSize: 13)), trailing: const Icon(Icons.drag_handle, color: Colors.grey, size: 20));
-    })), actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('完成'))]));
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Row(children: [
+            Icon(Icons.sort, size: 20),
+            SizedBox(width: 8),
+            Text('调整图片顺序'),
+          ]),
+          content: SizedBox(
+            width: 360,
+            height: 320,
+            child: ReorderableListView.builder(
+              buildDefaultDragHandles: false,
+              itemCount: reordered.length,
+              onReorderItem: (oldIndex, newIndex) {
+                setDialogState(() {
+                  final item = reordered.removeAt(oldIndex);
+                  reordered.insert(newIndex, item);
+                });
+                setState(() {
+                  _selectedImages
+                    ..clear()
+                    ..addAll(reordered);
+                });
+                _autoPreview();
+              },
+              itemBuilder: (ctx, index) {
+                final item = reordered[index];
+                return ReorderableDragStartListener(
+                  key: ObjectKey(item),
+                  index: index,
+                  child: ListTile(
+                    dense: true,
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+                    leading: CircleAvatar(
+                      radius: 14,
+                      backgroundColor: Theme.of(ctx).colorScheme.primary,
+                      foregroundColor: Colors.white,
+                      child: Text('${index + 1}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+                    ),
+                    title: Text(item.name, overflow: TextOverflow.ellipsis, maxLines: 1, style: const TextStyle(fontSize: 13)),
+                    trailing: const Icon(Icons.drag_handle, color: Colors.grey, size: 20),
+                  ),
+                );
+              },
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('完成')),
+          ],
+        ),
+      ),
+    );
   }
 
   /// 让用户选择保存路径，固定 PNG 格式。Android/iOS 需传入 bytes 直接写入
