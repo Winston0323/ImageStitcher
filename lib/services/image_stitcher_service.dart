@@ -26,6 +26,8 @@ class ImageStitcherService {
     ui.Color borderColor = const ui.Color(0xFF000000),
     double borderPercent = 3.0,
     bool rainbowBorder = false,
+    List<double>? scales,  // 每张图的缩放因子 (1.0=100%, 默认 1.0)
+    List<ui.Offset>? offsets, // 每张图的平移偏移（源像素，默认 0,0）
   }) async {
     if (images.isEmpty) throw Exception('没有可拼接的图片');
     if (images.length == 1 && !addBorder) return images.first;
@@ -61,6 +63,27 @@ class ImageStitcherService {
     int canvasWidth, canvasHeight;
     List<ui.Rect> dstRects;
     int bw = 0;
+
+    // 计算每张图的源裁剪区域（scale>1 时取中心 1/s 区域，offset 偏移裁剪中心）
+    final srcRects = <ui.Rect>[];
+    for (int i = 0; i < decodedImages.length; i++) {
+      final src = decodedImages[i];
+      final s = scales != null && i < scales.length ? scales[i] : 1.0;
+      final off = offsets != null && i < offsets.length ? offsets[i] : ui.Offset.zero;
+      if (s <= 1.0) {
+        srcRects.add(ui.Rect.fromLTWH(0, 0, src.width.toDouble(), src.height.toDouble()));
+      } else {
+        final cropW = src.width / s;
+        final cropH = src.height / s;
+        final cx = src.width / 2 + off.dx;
+        final cy = src.height / 2 + off.dy;
+        srcRects.add(ui.Rect.fromLTWH(
+          (cx - cropW / 2).clamp(0.0, src.width - cropW),
+          (cy - cropH / 2).clamp(0.0, src.height - cropH),
+          cropW, cropH,
+        ));
+      }
+    }
 
     if (mode == StitchMode.horizontal) {
       int maxHeight = decodedImages.map((e) => e.height).reduce((a, b) => a > b ? a : b);
@@ -117,9 +140,7 @@ class ImageStitcherService {
     log('✅ 原始画布: ${canvasWidth}×${canvasHeight} ($pixelCount MP)');
     onProgress?.call(0.18);
 
-    // 计算输出缩放比例
-    // 预览：限制最大边长加速渲染
-    // Web 保存：限制 8192px 防止 Dart PNG 编码超大缓冲区 (98MP→393MB→223s)
+    // 计算输出缩放比例（仅预览模式）
     double scale = 1.0;
     int outW = canvasWidth, outH = canvasHeight;
     if (maxPreviewDim > 0) {
@@ -129,15 +150,8 @@ class ImageStitcherService {
         outH = (canvasHeight * scale).round();
         log('📐 预览缩放: ${(scale*100).toStringAsFixed(0)}% → ${outW}×${outH}');
       }
-    } else if (kIsWeb) {
-      const int webSaveMax = 16383;
-      if (canvasWidth > webSaveMax || canvasHeight > webSaveMax) {
-        scale = webSaveMax / (canvasWidth > canvasHeight ? canvasWidth : canvasHeight).toDouble();
-        outW = (canvasWidth * scale).round();
-        outH = (canvasHeight * scale).round();
-        log('📐 Web保存缩放: ${(scale*100).toStringAsFixed(0)}% → ${outW}×${outH}');
-      }
     }
+    // 保存模式不缩放——走 Step 4 分块渲染突破 GPU 纹理上限
 
     // ========== Step 3: GPU Canvas 绘制 ==========
     log('GPU 绘制合成中...');
@@ -229,7 +243,7 @@ class ImageStitcherService {
 
       canvas.drawImageRect(
         src,
-        ui.Rect.fromLTWH(0, 0, src.width.toDouble(), src.height.toDouble()),
+        srcRects[i],
         scaledRect(dst.left, dst.top, dst.width, dst.height),
         ui.Paint()..filterQuality = ui.FilterQuality.medium,
       );
@@ -245,7 +259,7 @@ class ImageStitcherService {
     const int gpuLimit = 4096;
     Uint8List outputBytes;
 
-    if (kIsWeb && (drawW > gpuLimit || drawH > gpuLimit)) {
+    if (drawW > gpuLimit || drawH > gpuLimit) {
       log('🔲 Web分块渲染: ${drawW}×${drawH} (上限${gpuLimit}px)...');
       onProgress?.call(0.60);
       final fullRgba = Uint8List(drawW * drawH * 4);
@@ -488,6 +502,31 @@ class ImageStitcherService {
     scaledImage.dispose();
     if (byteData == null) throw Exception('缩略图编码失败');
 
+    return byteData.buffer.asUint8List();
+  }
+
+  /// 按线性缩放因子缩放图片（保持宽高比）
+  /// [scale] 线性缩放比例，1.0=原尺寸，2.0=两倍
+  static Future<Uint8List> resizeImage(Uint8List bytes, double scale) async {
+    final image = await _decodeImageFromBytes(bytes);
+    if (image == null) throw Exception('缩放解码失败');
+    final dstW = (image.width * scale).round();
+    final dstH = (image.height * scale).round();
+    final recorder = ui.PictureRecorder();
+    final canvas = ui.Canvas(recorder);
+    canvas.drawImageRect(
+      image,
+      ui.Rect.fromLTWH(0, 0, image.width.toDouble(), image.height.toDouble()),
+      ui.Rect.fromLTWH(0, 0, dstW.toDouble(), dstH.toDouble()),
+      ui.Paint()..filterQuality = ui.FilterQuality.high,
+    );
+    image.dispose();
+    final picture = recorder.endRecording();
+    final result = await picture.toImage(dstW, dstH);
+    picture.dispose();
+    final byteData = await result.toByteData(format: ui.ImageByteFormat.png);
+    result.dispose();
+    if (byteData == null) throw Exception('缩放编码失败');
     return byteData.buffer.asUint8List();
   }
 

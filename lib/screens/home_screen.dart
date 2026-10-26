@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:io' show Platform, File;
+import 'dart:math' as math;
 import 'dart:typed_data';
+import 'dart:ui' as ui;
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/gestures.dart';
 import 'package:path_provider/path_provider.dart';
@@ -36,11 +38,49 @@ class _HomeScreenState extends State<HomeScreen> {
   int _borderColorIndex = 0; // 0=白色, 1=黑色
   double _borderPercent = 0.0;
 
-  // 预览数据
-  Uint8List? _previewBytes;
+  // 预览数据（GPU 实时绘制，不再缓存整张预览图）
+  // 真正的输出尺寸（根据原图尺寸+边框计算，非预览缩放后的尺寸）
+  int? _outputWidth;
+  int? _outputHeight;
+  bool _showRuler = true;
   final ScrollController _windowsThumbScroll = ScrollController();
 
   bool get _isWindowsDesktop => !kIsWeb && Platform.isWindows;
+
+  // 大预览图点选 + 角点拖拽缩放
+  int? _selectedSubImageIndex;
+  // 每张图的缩放因子 (1.0=100%, 3.0=300%)
+  List<double> _imageScales = [];
+  // 每张图的平移偏移（源像素，0,0=居中）
+  List<Offset> _imageOffsets = [];
+  // 子图拖拽平移
+  Offset? _panLastPos;
+  Offset? _panStartPos; // 拖拽起始位置（用于阈值判断）
+  bool _panActive = false; // 是否已越过阈值，开始实际拖拽
+  int? _panPointerId;
+  // 双指缩放
+  final Map<int, Offset> _activePointers = {};
+  double? _pinchStartDist;
+  double _pinchStartScale = 1.0;
+  // 选中子图的源/显示像素比 + 显示矩形
+  double _selectedSrcToDispRatio = 1.0;
+  ui.Rect? _selectedSubRect;
+  // 大图变换
+  final TransformationController _viewController = TransformationController();
+  // 实时预览：缓存解码后的缩略图 ui.Image
+  List<ui.Image?> _decodedThumbs = [];
+
+  double _scaleOf(int index) =>
+      index < _imageScales.length ? _imageScales[index] : 1.0;
+
+  Offset _offsetOf(int index) =>
+      index < _imageOffsets.length ? _imageOffsets[index] : Offset.zero;
+
+  /// 所有缩略图都已解码，可以实时预览
+  bool get _canLivePreview =>
+      _selectedImages.isNotEmpty &&
+      _decodedThumbs.length >= _selectedImages.length &&
+      _decodedThumbs.every((e) => e != null);
 
   @override
   Widget build(BuildContext context) {
@@ -65,7 +105,7 @@ class _HomeScreenState extends State<HomeScreen> {
       appBar: AppBar(
         title: const Text('图片拼接工具'),
         actions: [
-          if (_previewBytes != null && !_isProcessing)
+          if (_selectedImages.isNotEmpty && !_isProcessing)
             IconButton(
               icon: const Icon(Icons.save_alt),
               tooltip: '保存图片',
@@ -77,7 +117,12 @@ class _HomeScreenState extends State<HomeScreen> {
               tooltip: '清空列表',
               onPressed: () => setState(() {
                 _selectedImages.clear();
-                _previewBytes = null;
+                _imageScales.clear();
+                _decodedThumbs.clear();
+                _imageOffsets.clear();
+                _selectedSubImageIndex = null;
+                _outputWidth = null;
+                _outputHeight = null;
               }),
             ),
         ],
@@ -90,95 +135,330 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Widget _buildPreviewPanel() {
     if (!kIsWeb && Platform.isAndroid) return _buildAndroidPreview();
-    return Card(
-      elevation: 4,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      clipBehavior: Clip.antiAlias,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          // 顶部工具栏
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-            color: Theme.of(context).colorScheme.primaryContainer.withValues(alpha: 0.5),
-            child: Row(
-              children: [
-                const Icon(Icons.preview, size: 18, color: Colors.blue),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        // 顶部工具栏（去卡片化）
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          decoration: BoxDecoration(
+            border: Border(bottom: BorderSide(color: Colors.grey.shade300, width: 0.5)),
+          ),
+          child: Row(
+            children: [
+              const Icon(Icons.preview, size: 16, color: Colors.grey),
+              const SizedBox(width: 6),
+              Text('${_stitchMode == StitchMode.horizontal ? "水平" : "垂直"}拼接',
+                  style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 12)),
+              if (_outputWidth != null && _outputHeight != null) ...[
                 const SizedBox(width: 8),
-                Text('预览 (${_stitchMode == StitchMode.horizontal ? "水平" : "垂直"}拼接)',
-                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
-                const Spacer(),
-                if (_isProcessing)
-                  Padding(
-                    padding: const EdgeInsets.only(right: 8),
+                Text('$_outputWidth × $_outputHeight px',
+                    style: TextStyle(fontSize: 11, color: Colors.grey[500])),
+              ],
+              const Spacer(),
+              if (_outputWidth != null)
+                SizedBox(
+                  width: 28, height: 28,
+                  child: IconButton(
+                    visualDensity: VisualDensity.compact,
+                    padding: EdgeInsets.zero,
+                    icon: Icon(
+                      _showRuler ? Icons.straighten : Icons.straighten_outlined,
+                      size: 18,
+                      color: _showRuler ? Colors.blue : Colors.grey,
+                    ),
+                    tooltip: _showRuler ? '关闭标尺' : '显示标尺',
+                    onPressed: () => setState(() => _showRuler = !_showRuler),
+                  ),
+                ),
+              if (_isProcessing)
+                Padding(
+                  padding: const EdgeInsets.only(right: 6),
+                  child: SizedBox(
+                    width: 14, height: 14,
+                    child: CircularProgressIndicator(strokeWidth: 2, color: Colors.blue),
+                  ),
+                ),
+              SizedBox(
+                width: 28, height: 28,
+                child: IconButton(
+                  visualDensity: VisualDensity.compact,
+                  padding: EdgeInsets.zero,
+                  icon: const Icon(Icons.refresh, size: 18),
+                  tooltip: '刷新预览',
+                  onPressed: (_selectedImages.isNotEmpty && !_isProcessing) ? _autoPreview : null,
+                ),
+              ),
+            ],
+          ),
+        ),
+        // 内容区域
+        Expanded(
+          child: _buildPreviewContent(),
+        ),
+      ],
+    );
+  }
+
+  /// 预览内容区（图片 + 工程图标注 + 保存进度）
+  Widget _buildPreviewContent() {
+    // 标注线需要的额外空间
+    const extPad = 32.0;
+    return Stack(
+      alignment: Alignment.center,
+      children: [
+        // 图片或占位
+        if (_canLivePreview && _outputWidth != null && _outputHeight != null)
+          InteractiveViewer(
+            transformationController: _viewController,
+            panEnabled: _selectedSubImageIndex == null,
+            scaleEnabled: _selectedSubImageIndex == null,
+            minScale: 0.15,
+            maxScale: 8.0,
+            boundaryMargin: const EdgeInsets.all(40),
+            child: Center(
+              child: LayoutBuilder(
+                builder: (ctx, constraints) {
+                  final containerW = constraints.maxWidth;
+                  final containerH = constraints.maxHeight;
+                  if (containerW <= 0 || containerH <= 0) return _buildEmptyPreview();
+                  // 预留标注线空间
+                  final availW = containerW - extPad;
+                  final availH = containerH - extPad;
+                  final imgAspect = _outputWidth! / _outputHeight!;
+                  double dispW, dispH;
+                  if (availW / availH > imgAspect) {
+                    dispH = availH;
+                    dispW = dispH * imgAspect;
+                  } else {
+                    dispW = availW;
+                    dispH = dispW / imgAspect;
+                  }
+                  final left = (containerW - dispW) / 2;
+                  final top = (containerH - dispH) / 2;
+                  // 计算子图区域（用于点击检测和选中高亮）
+                  final displayScaleX = dispW / _outputWidth!;
+                  final displayScaleY = dispH / _outputHeight!;
+                  final subRects = _buildSubRects(
+                    left, top, displayScaleX, displayScaleY,
+                  );
+                  // 计算选中子图的源/显示像素比（供拖拽转换用）+ 存储子图矩形
+                  if (_selectedSubImageIndex != null && _selectedSubImageIndex! < subRects.length) {
+                    _selectedSubRect = subRects[_selectedSubImageIndex!];
+                    final item = _selectedImages[_selectedSubImageIndex!];
+                    if (item.originalWidth != null) {
+                      final s = _scaleOf(_selectedSubImageIndex!);
+                      final cropW = item.originalWidth! / s;
+                      final dispW_i = subRects[_selectedSubImageIndex!].width;
+                      _selectedSrcToDispRatio = dispW_i > 0 ? cropW / dispW_i : 1.0;
+                    }
+                  }
+
+                  return GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTapDown: (d) => _onPreviewTap(d.localPosition, subRects),
                     child: SizedBox(
-                      width: 16, height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.blue),
+                    width: containerW,
+                    height: containerH,
+                    child: Stack(
+                      clipBehavior: Clip.none,
+                      children: [
+                        // 图片（Listener 实现拖拽平移，绕过手势竞争）
+                        Positioned(
+                          left: left, top: top,
+                          width: dispW, height: dispH,
+                          child: Listener(
+                            onPointerSignal: (e) {
+                              if (e is! PointerScrollEvent) return;
+                              if (_selectedSubImageIndex != null) {
+                                // 滚轮缩放子图
+                                final idx = _selectedSubImageIndex!;
+                                final cur = _scaleOf(idx);
+                                final newScale = (cur - e.scrollDelta.dy / 400).clamp(1.0, 3.0);
+                                if ((newScale - cur).abs() > 0.002) {
+                                  setState(() {
+                                    while (_imageScales.length <= idx) _imageScales.add(1.0);
+                                    _imageScales[idx] = double.parse(newScale.toStringAsFixed(2));
+                                  });
+                                  _calculateOutputDimensions();
+                                }
+                              } else {
+                                // 滚轮缩放大图
+                                final cur = _viewController.value.getMaxScaleOnAxis();
+                                final newScale = (cur - e.scrollDelta.dy / 400).clamp(0.15, 8.0);
+                                final factor = newScale / cur;
+                                final matrix = _viewController.value.clone();
+                                matrix.scale(factor);
+                                _viewController.value = matrix;
+                              }
+                            },
+                            onPointerDown: (e) {
+                              if (_selectedSubImageIndex == null) return;
+                              _activePointers[e.pointer] = e.localPosition;
+                              if (_activePointers.length == 2) {
+                                // 双指缩放开始
+                                final pts = _activePointers.values.toList();
+                                _pinchStartDist = (pts[0] - pts[1]).distance;
+                                _pinchStartScale = _scaleOf(_selectedSubImageIndex!);
+                                _panPointerId = null;
+                                _panLastPos = null;
+                                _panActive = false;
+                              } else if (_activePointers.length == 1) {
+                                // 单指：记录起始位置，延迟判断是点击还是拖拽
+                                _panPointerId = e.pointer;
+                                _panLastPos = e.localPosition;
+                                _panStartPos = e.localPosition;
+                                _panActive = false;
+                              }
+                            },
+                            onPointerMove: (e) {
+                              if (_selectedSubImageIndex == null) return;
+                              if (!_activePointers.containsKey(e.pointer)) return;
+                              _activePointers[e.pointer] = e.localPosition;
+                              if (_activePointers.length >= 2 && _pinchStartDist != null) {
+                                // 双指缩放子图
+                                final pts = _activePointers.values.toList();
+                                final dist = (pts[0] - pts[1]).distance;
+                                final newScale = (_pinchStartScale * dist / _pinchStartDist!).clamp(1.0, 3.0);
+                                final idx = _selectedSubImageIndex!;
+                                final cur = _scaleOf(idx);
+                                if ((newScale - cur).abs() > 0.002) {
+                                  setState(() {
+                                    while (_imageScales.length <= idx) _imageScales.add(1.0);
+                                    _imageScales[idx] = double.parse(newScale.toStringAsFixed(2));
+                                  });
+                                  _calculateOutputDimensions();
+                                }
+                              } else if (e.pointer == _panPointerId && _panLastPos != null) {
+                                // 单指：超过阈值才开始拖拽，避免误触
+                                if (!_panActive && _panStartPos != null) {
+                                  if ((e.localPosition - _panStartPos!).distance < 10) return;
+                                  _panActive = true;
+                                  _panLastPos = e.localPosition; // 重置基准，避免跳变
+                                }
+                                if (_panActive) {
+                                  final delta = e.localPosition - _panLastPos!;
+                                  _panLastPos = e.localPosition;
+                                  _onImagePanDelta(delta);
+                                }
+                              }
+                            },
+                            onPointerUp: (e) {
+                              _activePointers.remove(e.pointer);
+                              if (e.pointer == _panPointerId) { _panPointerId = null; _panLastPos = null; _panActive = false; }
+                              if (_activePointers.isEmpty) _pinchStartDist = null;
+                            },
+                            onPointerCancel: (e) {
+                              _activePointers.remove(e.pointer);
+                              if (e.pointer == _panPointerId) { _panPointerId = null; _panLastPos = null; _panActive = false; }
+                              if (_activePointers.isEmpty) _pinchStartDist = null;
+                            },
+                            child: ClipRRect(
+                            borderRadius: BorderRadius.circular(2),
+                            child: CustomPaint(
+                              size: Size(dispW, dispH),
+                              painter: _LivePreviewPainter(
+                                images: [for (var e in _decodedThumbs) e!],
+                                mode: _stitchMode,
+                                scales: _imageScales,
+                                offsets: _imageOffsets,
+                                originalDims: [
+                                  for (var item in _selectedImages)
+                                    if (item.originalWidth != null && item.originalHeight != null)
+                                      (width: item.originalWidth!, height: item.originalHeight!),
+                                ],
+                                addBorder: _borderPercent > 0,
+                                borderColor: _borderUiColor,
+                                borderPercent: _borderPercent,
+                                rainbowBorder: _isRainbowBorder,
+                              ),
+                            ),
+                          ),
+                          ),
+                        ),
+                        // 选中高亮（独立于标尺，始终显示）
+                        if (_selectedSubImageIndex != null &&
+                            _selectedSubImageIndex! < subRects.length)
+                          Positioned.fill(
+                            child: IgnorePointer(
+                              child: CustomPaint(
+                                painter: _HighlightPainter(
+                                  subRects[_selectedSubImageIndex!],
+                                ),
+                              ),
+                            ),
+                          ),
+                        // 工程图样式标注 - 填满容器以确保有空间画延伸线
+                        if (_showRuler)
+                          Positioned.fill(
+                            child: IgnorePointer(
+                              child: CustomPaint(
+                                painter: _DimensionPainter(
+                                imageLeft: left, imageTop: top,
+                                imageWidth: dispW, imageHeight: dispH,
+                                displayWidth: _outputWidth!,
+                                displayHeight: _outputHeight!,
+                                strokeColor: Colors.white70,
+                                textColor: Colors.white,
+                                stitchMode: _stitchMode,
+                                originalDims: [
+                                  for (var item in _selectedImages)
+                                    if (item.originalWidth != null && item.originalHeight != null)
+                                      (width: item.originalWidth!, height: item.originalHeight!),
+                                ],
+                                borderPercent: _borderPercent,
+                                selectedIndex: _selectedSubImageIndex,
+                                imageScales: _imageScales,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
-                  ),
-                IconButton(visualDensity: VisualDensity.compact, icon: const Icon(Icons.refresh, size: 20), tooltip: '刷新预览', onPressed: (_selectedImages.isNotEmpty && !_isProcessing) ? _autoPreview : null),
-              ],
+                    ),
+                  );
+                },
+              ),
             ),
-          ),
-          // 内容区域
-          Flexible(
-            child: Stack(
+          )
+        else
+          _buildEmptyPreview(),
+        // 保存进度覆盖层
+        if (_saveProgress > 0)
+          Positioned.fill(
+            child: Container(
+              color: Colors.black54,
               alignment: Alignment.center,
-              children: [
-                // 图片或占位
-                _previewBytes != null
-                    ? InteractiveViewer(
-                        minScale: 0.15,
-                        maxScale: 8.0,
-                        boundaryMargin: const EdgeInsets.all(16),
-                        child: Center(
-                          child: Container(
-                            color: Colors.grey[300],
-                            child: Image.memory(_previewBytes!, fit: BoxFit.contain,
-                              errorBuilder: (_, __, ___) => const Icon(Icons.broken_image, size: 64, color: Colors.redAccent)),
-                          ),
-                        ),
-                      )
-                    : Center(
-                        child: Container(
-                          color: Colors.grey[300],
-                          constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.65),
-                          child: Center(
-                            child: Column(mainAxisSize: MainAxisSize.min, children: [
-                              Icon(Icons.image_outlined, size: 64, color: Colors.grey[350]),
-                              const SizedBox(height: 12),
-                              Text('选择图片后\n将在此显示预览',
-                                  textAlign: TextAlign.center, style: TextStyle(fontSize: 14, color: Colors.grey[500], height: 1.5)),
-                            ]),
-                          ),
-                        ),
-                      ),
-                // 保存进度覆盖层
-                if (_saveProgress > 0)
-                  Positioned.fill(
-                    child: Container(
-                      color: Colors.black54,
-                      alignment: Alignment.center,
-                      child: Column(mainAxisSize: MainAxisSize.min, children: [
-                        SizedBox(
-                          width: 72, height: 72,
-                          child: Stack(
-                            fit: StackFit.expand,
-                            children: [
-                              CircularProgressIndicator(strokeWidth: 5, value: _saveProgress, color: Colors.white, backgroundColor: Colors.white24),
-                              Center(child: Text('${(_saveProgress * 100).toInt()}%', style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w700))),
-                            ],
-                          ),
-                        ),
-                        const SizedBox(height: 12),
-                        const Text('正在保存...', style: TextStyle(color: Colors.white70, fontSize: 13)),
-                      ]),
-                    ),
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                SizedBox(
+                  width: 72, height: 72,
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      CircularProgressIndicator(strokeWidth: 5, value: _saveProgress, color: Colors.white, backgroundColor: Colors.white24),
+                      Center(child: Text('${(_saveProgress * 100).toInt()}%', style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w700))),
+                    ],
                   ),
-              ],
+                ),
+                const SizedBox(height: 12),
+                const Text('正在保存...', style: TextStyle(color: Colors.white70, fontSize: 13)),
+              ]),
             ),
           ),
-        ],
+      ],
+    );
+  }
+
+  Widget _buildEmptyPreview() {
+    return Container(
+      color: Colors.grey.shade100,
+      child: Center(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Icon(Icons.image_outlined, size: 48, color: Colors.grey[350]),
+          const SizedBox(height: 12),
+          Text('选择图片后\n将在此显示预览',
+              textAlign: TextAlign.center, style: TextStyle(fontSize: 14, color: Colors.grey[400], height: 1.5)),
+        ]),
       ),
     );
   }
@@ -188,16 +468,40 @@ class _HomeScreenState extends State<HomeScreen> {
     return Stack(
       alignment: Alignment.center,
       children: [
-        _previewBytes != null
+        _canLivePreview
             ? InteractiveViewer(
                 minScale: 0.15,
                 maxScale: 8.0,
                 boundaryMargin: const EdgeInsets.all(16),
                 child: Center(
-                  child: Image.memory(_previewBytes!,
-                      fit: BoxFit.contain,
-                      errorBuilder: (_, __, ___) =>
-                          const Icon(Icons.broken_image, size: 64, color: Colors.redAccent)),
+                  child: LayoutBuilder(
+                    builder: (ctx, constraints) {
+                      if (constraints.maxWidth <= 0 || constraints.maxHeight <= 0) {
+                        return const SizedBox.shrink();
+                      }
+                      return SizedBox(
+                        width: constraints.maxWidth,
+                        height: constraints.maxHeight,
+                        child: CustomPaint(
+                          painter: _LivePreviewPainter(
+                            images: [for (var e in _decodedThumbs) e!],
+                            mode: _stitchMode,
+                            scales: _imageScales,
+                            offsets: _imageOffsets,
+                            originalDims: [
+                              for (var item in _selectedImages)
+                                if (item.originalWidth != null && item.originalHeight != null)
+                                  (width: item.originalWidth!, height: item.originalHeight!),
+                            ],
+                            addBorder: _borderPercent > 0,
+                            borderColor: _borderUiColor,
+                            borderPercent: _borderPercent,
+                            rainbowBorder: _isRainbowBorder,
+                          ),
+                        ),
+                      );
+                    },
+                  ),
                 ),
               )
             : Center(
@@ -304,10 +608,7 @@ class _HomeScreenState extends State<HomeScreen> {
             padding: const EdgeInsets.only(bottom: 12, right: 4),
             itemCount: _selectedImages.length,
             onReorderItem: (oldIndex, newIndex) {
-              setState(() {
-                final item = _selectedImages.removeAt(oldIndex);
-                _selectedImages.insert(newIndex, item);
-              });
+              setState(() => _reorderImageLists(oldIndex, newIndex));
               _autoPreview();
             },
             proxyDecorator: (child, index, animation) {
@@ -389,10 +690,7 @@ class _HomeScreenState extends State<HomeScreen> {
           Positioned(
             top: 0, right: 0,
             child: GestureDetector(
-              onTap: () {
-                setState(() => _selectedImages.removeAt(index));
-                _autoPreview();
-              },
+              onTap: () => _removeImageAt(index),
               behavior: HitTestBehavior.opaque,
               child: const Padding(
                 padding: EdgeInsets.all(2),
@@ -436,7 +734,7 @@ class _HomeScreenState extends State<HomeScreen> {
       icon: Icons.add_photo_alternate_outlined,
       title: '选择图片',
       subtitle: _selectedImages.isEmpty ? '未添加' : '已添加 ${_selectedImages.length} 张',
-      onClear: _selectedImages.isNotEmpty ? () => setState(() { _selectedImages.clear(); _previewBytes = null; }) : null,
+      onClear: _selectedImages.isNotEmpty ? () => setState(() { _selectedImages.clear(); _imageScales.clear(); _decodedThumbs.clear(); _imageOffsets.clear(); _selectedSubImageIndex = null; _outputWidth = null; _outputHeight = null; }) : null,
       child: _isWindowsDesktop
           ? Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -872,7 +1170,13 @@ class _HomeScreenState extends State<HomeScreen> {
                   setState(() {
                     if (newIndex > oldIndex) newIndex--;
                     final item = _selectedImages.removeAt(oldIndex);
+                    final scale = _imageScales.length > oldIndex ? _imageScales.removeAt(oldIndex) : 1.0;
+                    final thumb = _decodedThumbs.length > oldIndex ? _decodedThumbs.removeAt(oldIndex) : null;
+                    final offset = _imageOffsets.length > oldIndex ? _imageOffsets.removeAt(oldIndex) : Offset.zero;
                     _selectedImages.insert(newIndex, item);
+                    _imageScales.insert(newIndex, scale);
+                    _decodedThumbs.insert(newIndex, thumb);
+                    _imageOffsets.insert(newIndex, offset);
                   });
                   _autoPreview();
                 },
@@ -925,6 +1229,9 @@ class _HomeScreenState extends State<HomeScreen> {
         child: InkWell(
           onTap: () => setState(() {
             _selectedImages.removeAt(index);
+            _imageScales.removeAt(index);
+            _decodedThumbs.removeAt(index);
+            _imageOffsets.removeAt(index);
             _autoPreview();
           }),
           child: Stack(
@@ -958,6 +1265,20 @@ class _HomeScreenState extends State<HomeScreen> {
                       style: const TextStyle(fontSize: 10, color: Colors.white, fontWeight: FontWeight.bold)),
                 ),
               ),
+              // 尺寸标注
+              if (item.originalWidth != null && item.originalHeight != null)
+                Positioned(
+                  bottom: 2, right: 2,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 1),
+                    decoration: BoxDecoration(
+                      color: Colors.black54,
+                      borderRadius: BorderRadius.circular(3),
+                    ),
+                    child: Text('${item.originalWidth}×${item.originalHeight}',
+                        style: const TextStyle(fontSize: 8, color: Colors.white70)),
+                  ),
+                ),
               // 删除遮罩
               Positioned.fill(
                 child: Material(
@@ -965,6 +1286,9 @@ class _HomeScreenState extends State<HomeScreen> {
                   child: InkWell(
                     onTap: () => setState(() {
                       _selectedImages.removeAt(index);
+                      _imageScales.removeAt(index);
+                      _decodedThumbs.removeAt(index);
+                      _imageOffsets.removeAt(index);
                       _autoPreview();
                     }),
                     child: const Align(
@@ -1109,10 +1433,7 @@ class _HomeScreenState extends State<HomeScreen> {
               w,
               h,
               highlighted: highlighted,
-              onRemove: () {
-                setState(() => _selectedImages.removeAt(index));
-                _autoPreview();
-              },
+              onRemove: () => _removeImageAt(index),
             ),
           ),
         );
@@ -1176,6 +1497,21 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
               ),
             ),
+          if (item.originalWidth != null && item.originalHeight != null)
+            Positioned(
+              bottom: 2, right: 2,
+              child: IgnorePointer(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 1),
+                  decoration: BoxDecoration(
+                    color: Colors.black54,
+                    borderRadius: BorderRadius.circular(3),
+                  ),
+                  child: Text('${item.originalWidth}×${item.originalHeight}',
+                      style: const TextStyle(fontSize: 8, color: Colors.white70)),
+                ),
+              ),
+            ),
           if (highlighted)
             IgnorePointer(
               child: DecoratedBox(
@@ -1190,13 +1526,37 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  /// 把 [from] 放到 [to] 的位置，其余图片顺移。
+  /// 把 [from] 放到 [to] 的位置，缩放、偏移和缩略图一起移动。
   void _moveImageTo(int from, int to) {
     if (from == to || from < 0 || to < 0) return;
     if (from >= _selectedImages.length || to >= _selectedImages.length) return;
+    setState(() => _reorderImageLists(from, to));
+    _autoPreview();
+  }
+
+  void _reorderImageLists(int from, int to) {
+    final item = _selectedImages.removeAt(from);
+    final scale = from < _imageScales.length ? _imageScales.removeAt(from) : 1.0;
+    final thumb = from < _decodedThumbs.length ? _decodedThumbs.removeAt(from) : null;
+    final offset = from < _imageOffsets.length ? _imageOffsets.removeAt(from) : Offset.zero;
+    _selectedImages.insert(to, item);
+    _imageScales.insert(math.min(to, _imageScales.length), scale);
+    _decodedThumbs.insert(math.min(to, _decodedThumbs.length), thumb);
+    _imageOffsets.insert(math.min(to, _imageOffsets.length), offset);
+    if (_selectedSubImageIndex == from) _selectedSubImageIndex = to;
+  }
+
+  void _removeImageAt(int index) {
     setState(() {
-      final item = _selectedImages.removeAt(from);
-      _selectedImages.insert(to, item);
+      _selectedImages.removeAt(index);
+      if (index < _imageScales.length) _imageScales.removeAt(index);
+      if (index < _decodedThumbs.length) _decodedThumbs.removeAt(index);
+      if (index < _imageOffsets.length) _imageOffsets.removeAt(index);
+      if (_selectedSubImageIndex == index) {
+        _selectedSubImageIndex = null;
+      } else if (_selectedSubImageIndex != null && _selectedSubImageIndex! > index) {
+        _selectedSubImageIndex = _selectedSubImageIndex! - 1;
+      }
     });
     _autoPreview();
   }
@@ -1224,7 +1584,12 @@ class _HomeScreenState extends State<HomeScreen> {
     return GestureDetector(
       onTap: isEmpty ? null : () => setState(() {
         _selectedImages.clear();
-        _previewBytes = null;
+        _imageScales.clear();
+        _decodedThumbs.clear();
+        _imageOffsets.clear();
+        _selectedSubImageIndex = null;
+        _outputWidth = null;
+        _outputHeight = null;
       }),
       child: Container(
         width: size,
@@ -1490,7 +1855,7 @@ class _HomeScreenState extends State<HomeScreen> {
                           key: ValueKey('sheet_${item.path}'),
                           direction: DismissDirection.endToStart,
                           onDismissed: (_) {
-                            setState(() => _selectedImages.removeAt(index));
+                            setState(() { _selectedImages.removeAt(index); _imageScales.removeAt(index); _decodedThumbs.removeAt(index); _imageOffsets.removeAt(index); });
                             setSheetState(() {});
                             _autoPreview();
                           },
@@ -1515,13 +1880,14 @@ class _HomeScreenState extends State<HomeScreen> {
                             ),
                             title: Text(item.name, overflow: TextOverflow.ellipsis, maxLines: 1,
                                 style: const TextStyle(fontSize: 13)),
-                            subtitle: Text('#${index + 1}',
+                            subtitle: Text(
+                              '#${index + 1}${item.originalWidth != null && item.originalHeight != null ? " · ${item.originalWidth}×${item.originalHeight}" : ""}',
                                 style: const TextStyle(fontSize: 11, color: Colors.blue, fontWeight: FontWeight.w600)),
                             trailing: IconButton(
                               iconSize: 18,
                               icon: const Icon(Icons.remove_circle_outline, color: Colors.redAccent),
                               onPressed: () {
-                                setState(() => _selectedImages.removeAt(index));
+                                setState(() { _selectedImages.removeAt(index); _imageScales.removeAt(index); _decodedThumbs.removeAt(index); _imageOffsets.removeAt(index); });
                                 setSheetState(() {});
                                 _autoPreview();
                               },
@@ -1573,7 +1939,7 @@ class _HomeScreenState extends State<HomeScreen> {
             originalWidth: picked.width,
             originalHeight: picked.height,
           );
-          setState(() => _selectedImages.add(item));
+          setState(() { _selectedImages.add(item); _imageScales.add(1.0); _decodedThumbs.add(null); _imageOffsets.add(Offset.zero); });
           tasks.add(_generateThumbnail(item));
         }
         if (mounted) ScaffoldMessenger.of(context).showSnackBar(
@@ -1609,7 +1975,7 @@ class _HomeScreenState extends State<HomeScreen> {
             path: file.name,
             name: file.name,
           );
-          setState(() => _selectedImages.add(item));
+          setState(() { _selectedImages.add(item); _imageScales.add(1.0); _decodedThumbs.add(null); _imageOffsets.add(Offset.zero); });
           tasks.add(_generateThumbnail(item));
         }
         if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('已添加 ${result.files.length} 张图片'), duration: const Duration(seconds: 1)));
@@ -1624,8 +1990,10 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _generateThumbnail(ImageItem item) async {
     try {
       final thumb = await ImageStitcherService.createThumbnail(item.bytes, percent: 10);
-      // 解码缩略图获取尺寸
+      // 解码缩略图获取尺寸 + 缓存 ui.Image 供实时预览用
       final dims = await ImageStitcherService.getImageDimensions(thumb);
+      final decoded = await _decodeUiImage(thumb);
+      final idx = _selectedImages.indexOf(item);
       if (mounted) {
         setState(() {
           item.thumbnailBytes = thumb;
@@ -1633,7 +2001,25 @@ class _HomeScreenState extends State<HomeScreen> {
             item.thumbWidth = dims.width.toDouble();
             item.thumbHeight = dims.height.toDouble();
           }
+          if (decoded != null && idx >= 0) {
+            while (_decodedThumbs.length <= idx) _decodedThumbs.add(null);
+            if (idx < _decodedThumbs.length) {
+              _decodedThumbs[idx] = decoded;
+            } else {
+              _decodedThumbs.add(decoded);
+            }
+          }
         });
+      }
+      // 如果还没有原始尺寸（如 file_picker 路径），解码原图获取
+      if (item.originalWidth == null || item.originalHeight == null) {
+        final origDims = await ImageStitcherService.getImageDimensions(item.bytes);
+        if (origDims != null && mounted) {
+          setState(() {
+            item.originalWidth = origDims.width;
+            item.originalHeight = origDims.height;
+          });
+        }
       }
     } catch (_) {
       // 缩略图生成失败不影响主流程
@@ -1647,32 +2033,152 @@ class _HomeScreenState extends State<HomeScreen> {
   }
   bool get _isRainbowBorder => _borderColorIndex == 2;
 
-  Future<void> _autoPreview() async {
+  /// 预览更新：GPU 实时绘制，只需同步计算尺寸 + 触发重绘
+  void _autoPreview() {
     if (_selectedImages.isEmpty) {
-      setState(() => _previewBytes = null);
+      setState(() { _outputWidth = null; _outputHeight = null; _selectedSubImageIndex = null; });
       return;
     }
-    setState(() { _isProcessing = true; });
-    try {
-      final imageBytes = await _getThumbnailBytes();
-      if (imageBytes == null) return; // 缩略图还没生成完，跳过
-      final stitchedBytes = await ImageStitcherService.stitchImages(
-        imageBytes,
-        mode: _stitchMode,
-        maxPreviewDim: 2048, // 预览缩放到最大边长2048，编码快10-50倍
-        addBorder: _borderPercent > 0,
-        borderColor: _borderUiColor,
-        borderPercent: _borderPercent,
-        rainbowBorder: _isRainbowBorder,
-      );
-      if (mounted) setState(() => _previewBytes = stitchedBytes);
-    } catch (e) {
-      // 失败也保留旧预览（如果有），不清空，但显示错误
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('预览生成失败: $e'), duration: const Duration(seconds: 5)));
-    } finally {
-      if (mounted) setState(() => _isProcessing = false);
+    _calculateOutputDimensions();
+    setState(() {}); // 触发 _LivePreviewPainter 重绘
+  }
+
+  /// 根据原始图片尺寸和边框设置，计算拼接后真正的输出尺寸（与 stitchImages 保存模式一致）
+  void _calculateOutputDimensions() {
+    // 需要所有图片都有原始尺寸
+    for (var item in _selectedImages) {
+      if (item.originalWidth == null || item.originalHeight == null) {
+        _outputWidth = null;
+        _outputHeight = null;
+        return;
+      }
+    }
+
+    final widths = _selectedImages.map((e) => e.originalWidth!).toList();
+    final heights = _selectedImages.map((e) => e.originalHeight!).toList();
+
+    int bw = 0;
+    if (_borderPercent > 0) {
+      final refDim = _stitchMode == StitchMode.horizontal
+          ? heights.reduce((a, b) => a > b ? a : b)
+          : widths.reduce((a, b) => a > b ? a : b);
+      bw = (refDim * _borderPercent / 100).round().clamp(1, 9999);
+    }
+
+    if (_stitchMode == StitchMode.horizontal) {
+      final maxH = heights.reduce((a, b) => a > b ? a : b);
+      int totalW = 0;
+      for (int i = 0; i < _selectedImages.length; i++) {
+        totalW += (widths[i] * maxH / heights[i]).round();
+      }
+      _outputWidth = totalW + bw * (_selectedImages.length + 1);
+      _outputHeight = maxH + 2 * bw;
+    } else {
+      final maxW = widths.reduce((a, b) => a > b ? a : b);
+      int totalH = 0;
+      for (int i = 0; i < _selectedImages.length; i++) {
+        totalH += (heights[i] * maxW / widths[i]).round();
+      }
+      _outputWidth = maxW + 2 * bw;
+      _outputHeight = totalH + bw * (_selectedImages.length + 1);
     }
   }
+
+  /// 解码 bytes 为 ui.Image（供实时预览用）
+  Future<ui.Image?> _decodeUiImage(Uint8List bytes) async {
+    final completer = Completer<ui.Image?>();
+    ui.decodeImageFromList(bytes, (img) => completer.complete(img));
+    return completer.future;
+  }
+
+  /// 计算每张子图在大预览中的显示矩形（用于点击检测）
+  List<ui.Rect> _buildSubRects(double offsetX, double offsetY,
+      double scaleX, double scaleY) {
+    if (_selectedImages.length <= 1) return [];
+    final rects = <ui.Rect>[];
+    final n = _selectedImages.length;
+    final widths = <int>[];
+    final heights = <int>[];
+    for (var item in _selectedImages) {
+      widths.add(item.originalWidth ?? 0);
+      heights.add(item.originalHeight ?? 0);
+    }
+    if (widths.contains(0)) return [];
+
+    int bw = 0;
+    if (_borderPercent > 0) {
+      final refDim = _stitchMode == StitchMode.horizontal
+          ? heights.reduce((a, b) => a > b ? a : b)
+          : widths.reduce((a, b) => a > b ? a : b);
+      bw = (refDim * _borderPercent / 100).round().clamp(1, 9999);
+    }
+    final bwDispX = bw * scaleX;
+    final bwDispY = bw * scaleY;
+
+    if (_stitchMode == StitchMode.horizontal) {
+      final maxH = heights.reduce((a, b) => a > b ? a : b);
+      double x = offsetX + bwDispX;
+      for (int i = 0; i < n; i++) {
+        final wDisp = (widths[i] * maxH / heights[i]) * scaleX;
+        rects.add(ui.Rect.fromLTWH(x, offsetY + bwDispY, wDisp, maxH * scaleY));
+        x += wDisp + bwDispX;
+      }
+    } else {
+      final maxW = widths.reduce((a, b) => a > b ? a : b);
+      double y = offsetY + bwDispY;
+      for (int i = 0; i < n; i++) {
+        final hDisp = (heights[i] * maxW / widths[i]) * scaleY;
+        rects.add(ui.Rect.fromLTWH(offsetX + bwDispX, y, maxW * scaleX, hDisp));
+        y += hDisp + bwDispY;
+      }
+    }
+    return rects;
+  }
+
+  /// 大预览图点击 → 选中对应子图
+  void _onPreviewTap(Offset localPos, List<ui.Rect> subRects) {
+    for (int i = 0; i < subRects.length; i++) {
+      if (subRects[i].contains(localPos)) {
+        setState(() {
+          _selectedSubImageIndex = _selectedSubImageIndex == i ? null : i;
+        });
+        return;
+      }
+    }
+    // 点到空白区域 → 取消选中
+    setState(() { _selectedSubImageIndex = null; _selectedSubRect = null; });
+  }
+
+  /// 选中子图拖拽：平移裁剪中心，限制在图片范围内
+  void _onImagePanDelta(Offset displayDelta) {
+    if (_selectedSubImageIndex == null) return;
+    final idx = _selectedSubImageIndex!;
+    final item = _selectedImages[idx];
+    if (item.originalWidth == null || item.originalHeight == null) return;
+
+    final s = _scaleOf(idx);
+    if (s <= 1.0) return; // 未缩放时无法平移
+    // 显示 delta → 源像素 delta（取反：向右拖图片向右移 = 裁剪中心向左移）
+    final srcDelta = -displayDelta * _selectedSrcToDispRatio;
+    while (_imageOffsets.length <= idx) _imageOffsets.add(Offset.zero);
+    var newOffset = _imageOffsets[idx] + srcDelta;
+
+    // 限制在图片范围内（裁剪区域不超出原图边界）
+    final cropW = item.originalWidth! / s;
+    final cropH = item.originalHeight! / s;
+    final maxX = (item.originalWidth! - cropW) / 2;
+    final maxY = (item.originalHeight! - cropH) / 2;
+    newOffset = Offset(
+      newOffset.dx.clamp(-maxX, maxX),
+      newOffset.dy.clamp(-maxY, maxY),
+    );
+
+    if (newOffset != _imageOffsets[idx]) {
+      setState(() => _imageOffsets[idx] = newOffset);
+    }
+  }
+
+
 
   void _startSaveTimer() {
     _stopSaveTimer();
@@ -1694,6 +2200,7 @@ class _HomeScreenState extends State<HomeScreen> {
   void dispose() {
     _stopSaveTimer();
     _windowsThumbScroll.dispose();
+    _viewController.dispose();
     super.dispose();
   }
 
@@ -1711,6 +2218,8 @@ class _HomeScreenState extends State<HomeScreen> {
         borderColor: _borderUiColor,
         borderPercent: _borderPercent,
         rainbowBorder: _isRainbowBorder,
+        scales: _imageScales,
+        offsets: _imageOffsets,
       );
       if (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) {
         await _saveToDeviceAlbum(fullResBytes);
@@ -1785,11 +2294,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   final item = reordered.removeAt(oldIndex);
                   reordered.insert(newIndex, item);
                 });
-                setState(() {
-                  _selectedImages
-                    ..clear()
-                    ..addAll(reordered);
-                });
+                setState(() => _reorderImageLists(oldIndex, newIndex));
                 _autoPreview();
               },
               itemBuilder: (ctx, index) {
@@ -1849,13 +2354,490 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<List<Uint8List>> _getSelectedImageBytes() async => [for (var item in _selectedImages) item.bytes];
 
-  /// 获取所有图片的缩略图字节，如果任意缩略图尚未生成则返回 null
-  Future<List<Uint8List>?> _getThumbnailBytes() async {
-    final result = <Uint8List>[];
-    for (var item in _selectedImages) {
-      if (item.thumbnailBytes == null) return null; // 缩略图还没生成
-      result.add(item.thumbnailBytes!);
+}
+
+
+/// 工程图风格的尺寸标注 Painter
+/// 在图片四周绘制标注线、箭头和尺寸文字
+class _DimensionPainter extends CustomPainter {
+  final double imageLeft, imageTop, imageWidth, imageHeight;
+  final int displayWidth, displayHeight;
+  final Color strokeColor;
+  final Color textColor;
+  final StitchMode stitchMode;
+  final List<({int width, int height})> originalDims;
+  final double borderPercent;
+  final int? selectedIndex;
+  final List<double> imageScales;
+
+  _DimensionPainter({
+    required this.imageLeft,
+    required this.imageTop,
+    required this.imageWidth,
+    required this.imageHeight,
+    required this.displayWidth,
+    required this.displayHeight,
+    required this.strokeColor,
+    required this.textColor,
+    required this.stitchMode,
+    required this.originalDims,
+    required this.borderPercent,
+    this.selectedIndex,
+    this.imageScales = const [],
+  });
+
+  static const double _extensionGap = 12;  // 延伸线与图片边缘的间距
+  static const double _extendLength = 18;  // 延伸线伸出长度
+  static const double _arrowSize = 7;       // 箭头大小
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = strokeColor
+      ..strokeWidth = 1.2
+      ..style = PaintingStyle.stroke;
+
+    final imgLeft = imageLeft;
+    final imgTop = imageTop;
+    final imgRight = imageLeft + imageWidth;
+    final imgBottom = imageTop + imageHeight;
+    final scaleX = imageWidth / displayWidth;
+    final scaleY = imageHeight / displayHeight;
+
+    // ---------- 计算每张子图的显示区域 ----------
+    final subRects = _computeSubRects(scaleX, scaleY, imgLeft, imgTop);
+
+    // ---------- 总体标注：底部宽度 ----------
+    final hExtLeft = imgLeft + _extensionGap;
+    final hExtRight = imgRight - _extensionGap;
+    final hLineY = imgBottom + _extendLength + 6;
+    canvas.drawLine(Offset(imgLeft, imgBottom), Offset(imgLeft, hLineY), paint);
+    canvas.drawLine(Offset(imgRight, imgBottom), Offset(imgRight, hLineY), paint);
+    canvas.drawLine(Offset(hExtLeft, hLineY), Offset(hExtRight, hLineY), paint);
+    _drawArrow(canvas, Offset(hExtLeft, hLineY), -1, paint);
+    _drawArrow(canvas, Offset(hExtRight, hLineY), 1, paint);
+    _drawDimText(canvas, '${displayWidth}px',
+        Offset((hExtLeft + hExtRight) / 2, hLineY - 7),
+        TextAlign.center);
+
+    // ---------- 总体标注：右侧高度 ----------
+    final vExtTop = imgTop + _extensionGap;
+    final vExtBottom = imgBottom - _extensionGap;
+    final vLineX = imgRight + _extendLength + 6;
+    canvas.drawLine(Offset(imgRight, imgTop), Offset(vLineX, imgTop), paint);
+    canvas.drawLine(Offset(imgRight, imgBottom), Offset(vLineX, imgBottom), paint);
+    canvas.drawLine(Offset(vLineX, vExtTop), Offset(vLineX, vExtBottom), paint);
+    _drawArrow(canvas, Offset(vLineX, vExtTop), -2, paint);
+    _drawArrow(canvas, Offset(vLineX, vExtBottom), 2, paint);
+    _drawDimText(canvas, '${displayHeight}px',
+        Offset(vLineX + 7, (imgTop + imgBottom) / 2),
+        TextAlign.left, rotate: false);
+
+    // ---------- 每张图的独立标注：上边（宽度）+ 边框 ----------
+    if (subRects.length > 1) {
+      final perPaint = Paint()
+        ..color = strokeColor.withValues(alpha: 0.45)
+        ..strokeWidth = 0.8
+        ..style = PaintingStyle.stroke;
+      final borderPaint = Paint()
+        ..color = strokeColor.withValues(alpha: 0.3)
+        ..strokeWidth = 0.5
+        ..style = PaintingStyle.stroke;
+      final topLineY = imgTop - _extendLength - 2;
+
+      for (int i = 0; i < subRects.length; i++) {
+        final r = subRects[i];
+        final midX = r.left + r.width / 2;
+        canvas.drawLine(Offset(midX, imgTop), Offset(midX, imgTop - 8), perPaint);
+        _drawDimTextSmall(canvas, '${originalDims[i].width}',
+            Offset(midX, topLineY), TextAlign.center);
+
+        // 边框标注：每张图之间的间隙
+        if (i < subRects.length - 1) {
+          final gapLeft = r.right;
+          final gapRight = subRects[i + 1].left;
+          if (gapRight > gapLeft) {
+            final gapMid = (gapLeft + gapRight) / 2;
+            canvas.drawLine(Offset(gapLeft, imgTop), Offset(gapLeft, imgTop - 5), borderPaint);
+            canvas.drawLine(Offset(gapRight, imgTop), Offset(gapRight, imgTop - 5), borderPaint);
+            final bwPx = stitchMode == StitchMode.horizontal
+                ? ((gapRight - gapLeft) / scaleX).round()
+                : ((gapRight - gapLeft) / scaleY).round();
+            _drawDimTextTiny(canvas, '↔$bwPx',
+                Offset(gapMid, topLineY), TextAlign.center);
+          }
+        }
+      }
+
+      // ---------- 每张图的独立标注：左边（高度）+ 边框 ----------
+      final leftLineX = imgLeft - _extendLength - 2;
+
+      for (int i = 0; i < subRects.length; i++) {
+        final r = subRects[i];
+        final midY = r.top + r.height / 2;
+        canvas.drawLine(Offset(imgLeft, midY), Offset(imgLeft - 8, midY), perPaint);
+        _drawDimTextSmall(canvas, '${originalDims[i].height}',
+            Offset(leftLineX, midY + 1), TextAlign.right);
+
+        // 边框标注：每张图之间的间隙
+        if (i < subRects.length - 1) {
+          final gapTop = r.bottom;
+          final gapBottom = subRects[i + 1].top;
+          if (gapBottom > gapTop) {
+            final gapMid = (gapTop + gapBottom) / 2;
+            canvas.drawLine(Offset(imgLeft, gapTop), Offset(imgLeft - 5, gapTop), borderPaint);
+            canvas.drawLine(Offset(imgLeft, gapBottom), Offset(imgLeft - 5, gapBottom), borderPaint);
+            final bwPx = ((gapBottom - gapTop) / (stitchMode == StitchMode.horizontal ? scaleY : scaleX)).round();
+            _drawDimTextTiny(canvas, '↕$bwPx',
+                Offset(leftLineX - 14, gapMid), TextAlign.right);
+          }
+        }
+      }
     }
-    return result;
   }
+
+  /// 计算每张子图在显示屏上的矩形区域（含边框间距）
+  List<ui.Rect> _computeSubRects(double scaleX, double scaleY,
+      double offsetX, double offsetY) {
+    if (originalDims.isEmpty) return [];
+    final rects = <ui.Rect>[];
+    final n = originalDims.length;
+    final widths = originalDims.map((e) => e.width).toList();
+    final heights = originalDims.map((e) => e.height).toList();
+
+    int bw = 0; // border width in output pixels
+    if (borderPercent > 0) {
+      final refDim = stitchMode == StitchMode.horizontal
+          ? heights.reduce((a, b) => a > b ? a : b)
+          : widths.reduce((a, b) => a > b ? a : b);
+      bw = (refDim * borderPercent / 100).round().clamp(1, 9999);
+    }
+    final bwDispX = bw * scaleX;
+    final bwDispY = bw * scaleY;
+
+    if (stitchMode == StitchMode.horizontal) {
+      final maxH = heights.reduce((a, b) => a > b ? a : b);
+      double x = offsetX + bwDispX;
+      for (int i = 0; i < n; i++) {
+        final wDisp = (widths[i] * maxH / heights[i]) * scaleX;
+        rects.add(ui.Rect.fromLTWH(x, offsetY + bwDispY, wDisp, maxH * scaleY));
+        x += wDisp + bwDispX;
+      }
+    } else {
+      final maxW = widths.reduce((a, b) => a > b ? a : b);
+      double y = offsetY + bwDispY;
+      for (int i = 0; i < n; i++) {
+        final hDisp = (heights[i] * maxW / widths[i]) * scaleY;
+        rects.add(ui.Rect.fromLTWH(offsetX + bwDispX, y, maxW * scaleX, hDisp));
+        y += hDisp + bwDispY;
+      }
+    }
+    return rects;
+  }
+
+  void _drawArrow(Canvas canvas, Offset tip, int direction, Paint paint) {
+    // direction: -1=left, 1=right, -2=up, 2=down
+    double dx1, dy1, dx2, dy2;
+    if (direction == -1) {
+      dx1 = _arrowSize; dy1 = -_arrowSize / 2; dx2 = _arrowSize; dy2 = _arrowSize / 2;
+    } else if (direction == 1) {
+      dx1 = -_arrowSize; dy1 = -_arrowSize / 2; dx2 = -_arrowSize; dy2 = _arrowSize / 2;
+    } else if (direction == -2) {
+      dx1 = -_arrowSize / 2; dy1 = _arrowSize; dx2 = _arrowSize / 2; dy2 = _arrowSize;
+    } else {
+      dx1 = -_arrowSize / 2; dy1 = -_arrowSize; dx2 = _arrowSize / 2; dy2 = -_arrowSize;
+    }
+    final fillPaint = Paint()
+      ..color = strokeColor
+      ..style = PaintingStyle.fill;
+    final path = Path()
+      ..moveTo(tip.dx, tip.dy)
+      ..lineTo(tip.dx + dx1, tip.dy + dy1)
+      ..lineTo(tip.dx + dx2, tip.dy + dy2)
+      ..close();
+    canvas.drawPath(path, fillPaint);
+  }
+
+  void _drawDimText(Canvas canvas, String text, Offset center,
+      TextAlign align, {bool rotate = false}) {
+    final tp = TextPainter(
+      text: TextSpan(
+        text: text,
+        style: TextStyle(
+          color: textColor,
+          fontSize: 11,
+          fontWeight: FontWeight.w600,
+          fontFamily: 'monospace',
+        ),
+      ),
+      textAlign: align,
+      textDirection: ui.TextDirection.ltr,
+    )..layout(maxWidth: 300);
+
+    if (rotate) {
+      canvas.save();
+      canvas.translate(center.dx, center.dy);
+      canvas.rotate(-math.pi / 2);
+      tp.paint(canvas, Offset(-tp.width / 2, -tp.height / 2));
+      canvas.restore();
+    } else {
+      tp.paint(canvas, Offset(center.dx - tp.width / 2, center.dy - tp.height));
+    }
+  }
+
+  /// 小号文字（每张图的独立标注）
+  void _drawDimTextSmall(Canvas canvas, String text, Offset center,
+      TextAlign align) {
+    final tp = TextPainter(
+      text: TextSpan(
+        text: text,
+        style: TextStyle(
+          color: textColor.withValues(alpha: 0.6),
+          fontSize: 9,
+          fontWeight: FontWeight.w500,
+          fontFamily: 'monospace',
+        ),
+      ),
+      textAlign: align,
+      textDirection: ui.TextDirection.ltr,
+    )..layout(maxWidth: 200);
+
+    // 半透明背景
+    final bgPaint = Paint()
+      ..color = const ui.Color(0x33000000)
+      ..style = PaintingStyle.fill;
+    final bgRect = ui.Rect.fromCenter(
+      center: center, width: tp.width + 6, height: tp.height + 2,
+    );
+    canvas.drawRRect(
+      ui.RRect.fromRectAndRadius(bgRect, const Radius.circular(3)),
+      bgPaint,
+    );
+
+    final paintX = align == TextAlign.right
+        ? center.dx - tp.width - 3
+        : center.dx - tp.width / 2;
+    tp.paint(canvas, Offset(paintX, center.dy - tp.height / 2));
+  }
+
+  /// 极小文字（边框宽度标注）
+  void _drawDimTextTiny(Canvas canvas, String text, Offset center,
+      TextAlign align) {
+    final tp = TextPainter(
+      text: TextSpan(
+        text: text,
+        style: TextStyle(
+          color: textColor.withValues(alpha: 0.45),
+          fontSize: 8,
+          fontWeight: FontWeight.w400,
+          fontFamily: 'monospace',
+        ),
+      ),
+      textAlign: align,
+      textDirection: ui.TextDirection.ltr,
+    )..layout(maxWidth: 160);
+
+    final paintX = align == TextAlign.right
+        ? center.dx - tp.width
+        : center.dx - tp.width / 2;
+    tp.paint(canvas, Offset(paintX, center.dy - tp.height / 2));
+  }
+
+  @override
+  bool shouldRepaint(covariant _DimensionPainter oldDelegate) {
+    return imageLeft != oldDelegate.imageLeft ||
+        imageTop != oldDelegate.imageTop ||
+        imageWidth != oldDelegate.imageWidth ||
+        imageHeight != oldDelegate.imageHeight ||
+        displayWidth != oldDelegate.displayWidth ||
+        displayHeight != oldDelegate.displayHeight ||
+        stitchMode != oldDelegate.stitchMode ||
+        selectedIndex != oldDelegate.selectedIndex;
+  }
+}
+
+
+/// 选中高亮 Painter（独立于标尺，仅由选中状态决定）
+class _HighlightPainter extends CustomPainter {
+  final ui.Rect rect;
+  _HighlightPainter(this.rect);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    canvas.drawRect(
+      rect,
+      Paint()..color = const ui.Color(0xFF4488FF)..strokeWidth = 3.0..style = PaintingStyle.stroke,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _HighlightPainter oldDelegate) =>
+      rect != oldDelegate.rect;
+}
+
+/// 实时预览 Painter：拖拽时直接用 GPU 画布绘制，跳过 PNG 编解码
+class _LivePreviewPainter extends CustomPainter {
+  final List<ui.Image> images;
+  final StitchMode mode;
+  final List<double> scales;
+  final List<Offset> offsets;
+  final List<({int width, int height})> originalDims;
+  final bool addBorder;
+  final ui.Color borderColor;
+  final double borderPercent;
+  final bool rainbowBorder;
+
+  _LivePreviewPainter({
+    required this.images,
+    required this.mode,
+    required this.scales,
+    required this.offsets,
+    required this.originalDims,
+    required this.addBorder,
+    required this.borderColor,
+    required this.borderPercent,
+    required this.rainbowBorder,
+  });
+
+  /// 计算源裁剪区域（scale>1 时取中心 1/s 区域，offset 偏移裁剪中心）
+  /// offset 以原图像素存储，需转换为缩略图像素
+  ui.Rect _computeSrcRect(ui.Image src, double s, Offset offset, int origW, int origH) {
+    if (s <= 1.0) {
+      return ui.Rect.fromLTWH(0, 0, src.width.toDouble(), src.height.toDouble());
+    }
+    // 原图像素 → 缩略图像素
+    final sx = src.width / origW;
+    final sy = src.height / origH;
+    final thumbOffset = Offset(offset.dx * sx, offset.dy * sy);
+    final cw = src.width / s;
+    final ch = src.height / s;
+    final cx = src.width / 2 + thumbOffset.dx;
+    final cy = src.height / 2 + thumbOffset.dy;
+    return ui.Rect.fromLTWH(
+      (cx - cw / 2).clamp(0.0, src.width - cw),
+      (cy - ch / 2).clamp(0.0, src.height - ch),
+      cw, ch,
+    );
+  }
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (images.isEmpty) return;
+
+    // 计算画布尺寸（与 stitchImages 一致，但不含 scale 对框的影响）
+    int maxHeight = images.map((e) => e.height).reduce((a, b) => a > b ? a : b);
+    int maxWidth = images.map((e) => e.width).reduce((a, b) => a > b ? a : b);
+    int bw = 0;
+    if (addBorder) {
+      final ref = mode == StitchMode.horizontal ? maxHeight : maxWidth;
+      bw = (ref * borderPercent / 100).round().clamp(1, 9999);
+    }
+
+    // 计算 dstRects + srcRects
+    final dstRects = <ui.Rect>[];
+    final srcRects = <ui.Rect>[];
+    int canvasW, canvasH;
+
+    if (mode == StitchMode.horizontal) {
+      int totalW = 0;
+      for (int i = 0; i < images.length; i++) {
+        final src = images[i];
+        final s = i < scales.length ? scales[i] : 1.0;
+        final w = (src.width * maxHeight / src.height).round();
+        dstRects.add(ui.Rect.fromLTWH(totalW.toDouble(), 0, w.toDouble(), maxHeight.toDouble()));
+        final origW = i < originalDims.length ? originalDims[i].width : src.width;
+        final origH = i < originalDims.length ? originalDims[i].height : src.height;
+        srcRects.add(_computeSrcRect(src, s, i < offsets.length ? offsets[i] : Offset.zero, origW, origH));
+        totalW += w;
+      }
+      canvasW = totalW + bw * (images.length + 1);
+      canvasH = maxHeight + 2 * bw;
+      if (addBorder) {
+        double ox = bw.toDouble();
+        for (int i = 0; i < dstRects.length; i++) {
+          dstRects[i] = ui.Rect.fromLTWH(ox, bw.toDouble(), dstRects[i].width, dstRects[i].height);
+          ox += dstRects[i].width + bw;
+        }
+      }
+    } else {
+      int totalH = 0;
+      for (int i = 0; i < images.length; i++) {
+        final src = images[i];
+        final s = i < scales.length ? scales[i] : 1.0;
+        final h = (src.height * maxWidth / src.width).round();
+        dstRects.add(ui.Rect.fromLTWH(0, totalH.toDouble(), maxWidth.toDouble(), h.toDouble()));
+        final origW2 = i < originalDims.length ? originalDims[i].width : src.width;
+        final origH2 = i < originalDims.length ? originalDims[i].height : src.height;
+        srcRects.add(_computeSrcRect(src, s, i < offsets.length ? offsets[i] : Offset.zero, origW2, origH2));
+        totalH += h;
+      }
+      canvasW = maxWidth + 2 * bw;
+      canvasH = totalH + bw * (images.length + 1);
+      if (addBorder) {
+        double oy = bw.toDouble();
+        for (int i = 0; i < dstRects.length; i++) {
+          dstRects[i] = ui.Rect.fromLTWH(bw.toDouble(), oy, dstRects[i].width, dstRects[i].height);
+          oy += dstRects[i].height + bw;
+        }
+      }
+    }
+
+    // 缩放到画布显示区域（BoxFit.contain）
+    final scaleX = size.width / canvasW;
+    final scaleY = size.height / canvasH;
+    final scale = scaleX < scaleY ? scaleX : scaleY;
+    final dispW = canvasW * scale;
+    final dispH = canvasH * scale;
+    final offX = (size.width - dispW) / 2;
+    final offY = (size.height - dispH) / 2;
+
+    canvas.save();
+    canvas.translate(offX, offY);
+    canvas.scale(scale);
+
+    // 白色背景
+    canvas.drawRect(
+      ui.Rect.fromLTWH(0, 0, canvasW.toDouble(), canvasH.toDouble()),
+      ui.Paint()..color = const ui.Color(0xFFFFFFFF),
+    );
+
+    // 彩虹边框：渐变跨越整个画布（与 stitchImages 服务端一致）
+    ui.Shader? rainbowShader;
+    if (addBorder && rainbowBorder) {
+      rainbowShader = const LinearGradient(
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+        colors: [
+          ui.Color(0xFFFF0000), ui.Color(0xFFFF7F00),
+          ui.Color(0xFFFFFF00), ui.Color(0xFF00FF00),
+          ui.Color(0xFF0000FF), ui.Color(0xFF4B0082),
+          ui.Color(0xFF8B00FF),
+        ],
+      ).createShader(ui.Rect.fromLTWH(0, 0, canvasW.toDouble(), canvasH.toDouble()));
+    }
+
+    // 边框 + 图片
+    for (int i = 0; i < images.length; i++) {
+      final dst = dstRects[i];
+      if (addBorder) {
+        final br = ui.Rect.fromLTWH(dst.left - bw, dst.top - bw, dst.width + 2 * bw, dst.height + 2 * bw);
+        if (rainbowBorder && rainbowShader != null) {
+          canvas.drawRect(br, ui.Paint()..shader = rainbowShader);
+        } else {
+          canvas.drawRect(br, ui.Paint()..color = borderColor);
+        }
+      }
+      canvas.drawImageRect(
+        images[i],
+        srcRects[i],
+        dst,
+        ui.Paint()..filterQuality = ui.FilterQuality.medium,
+      );
+    }
+
+    canvas.restore();
+  }
+
+  @override
+  bool shouldRepaint(covariant _LivePreviewPainter oldDelegate) => true;
 }

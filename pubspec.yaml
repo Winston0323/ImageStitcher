@@ -25,8 +25,10 @@ dependencies:
   # 保存图片到系统相册（自定义相簿）
   gal: ^2.3.0
 
+  # 纯 Dart 图片编解码（突破 GPU 纹理上限）
+  image: ^4.5.3
 
-  
+
   # UI 组件
   cupertino_icons: ^1.0.6
 
